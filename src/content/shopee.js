@@ -394,10 +394,44 @@
     return data;
   }
 
+  // Helper function to safely send message to extension
+  function safeSendMessage(message, callback) {
+    try {
+      // Check if chrome.runtime is available
+      if (!chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
+        console.error('[Copee] Chrome runtime not available');
+        if (callback) callback({ error: 'Chrome runtime not available' });
+        return;
+      }
+      
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          const error = chrome.runtime.lastError.message;
+          // Check if it's the "Extension context invalidated" error
+          if (error && error.includes('Extension context invalidated')) {
+            console.warn('[Copee] Extension context invalidated. Please reload the page.');
+            // Stop trying to send messages
+            if (window.copeeExtractTimeout) {
+              clearTimeout(window.copeeExtractTimeout);
+            }
+          } else {
+            console.error('[Copee] Error sending message:', error);
+          }
+          if (callback) callback({ error: error });
+        } else {
+          if (callback) callback(response);
+        }
+      });
+    } catch (error) {
+      console.error('[Copee] Exception sending message:', error);
+      if (callback) callback({ error: error.message });
+    }
+  }
+
   // Send product data to popup
   function sendProductData() {
     const productData = extractProductData();
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       action: 'productData',
       data: productData
     });
@@ -428,12 +462,16 @@
     if (hasTitle) {
       // Send data immediately if we have title
       console.log('[Copee] Sending product data to background:', productData);
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         action: 'productData',
         data: productData
       }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error('[Copee] Error sending message:', chrome.runtime.lastError);
+        if (response && response.error) {
+          // If extension context invalidated, stop retrying
+          if (response.error.includes('Extension context invalidated')) {
+            console.warn('[Copee] Extension reloaded. Please reload this page.');
+            return;
+          }
         } else {
           console.log('[Copee] Message sent successfully');
         }
@@ -445,12 +483,15 @@
     } else {
       // Max attempts reached, send whatever we have
       console.log('[Copee] Max attempts reached, sending data anyway:', productData);
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         action: 'productData',
         data: productData
       }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error('[Copee] Error sending message:', chrome.runtime.lastError);
+        if (response && response.error) {
+          if (response.error.includes('Extension context invalidated')) {
+            console.warn('[Copee] Extension reloaded. Please reload this page.');
+            return;
+          }
         }
       });
     }
