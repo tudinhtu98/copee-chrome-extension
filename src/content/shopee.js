@@ -26,14 +26,39 @@
       }
 
       // Extract price - try multiple selectors
-      const priceElement = document.querySelector('[data-testid="product-price"], .product-price, [content*="price"]');
+      const priceSelectors = [
+        // New Shopee selector
+        '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div > section > div > div.IZPeQz.B67UQ0',
+        // Fallback selectors
+        '[data-testid="product-price"]',
+        '.product-price',
+        '[content*="price"]',
+        '.product-intro__head-price',
+        '.product-price-current',
+      ];
+      
+      let priceElement = null;
+      for (const selector of priceSelectors) {
+        priceElement = document.querySelector(selector);
+        if (priceElement) {
+          console.log('[Copee] Found price element with selector:', selector);
+          break;
+        }
+      }
+      
       if (priceElement) {
         const priceText = priceElement.textContent || priceElement.getAttribute('content') || '';
+        console.log('[Copee] Price text:', priceText);
         // Remove non-numeric characters except dots
         const priceNum = parseInt(priceText.replace(/[^0-9]/g, ''));
         if (!isNaN(priceNum)) {
           data.price = priceNum;
+          console.log('[Copee] Extracted price:', data.price);
+        } else {
+          console.warn('[Copee] Could not parse price from text:', priceText);
         }
+      } else {
+        console.warn('[Copee] Could not find price element with any selector');
       }
 
       // Extract images - try multiple selectors
