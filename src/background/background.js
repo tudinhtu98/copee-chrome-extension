@@ -89,11 +89,16 @@ async function copyProductToCopee(productData) {
     const cleanToken = authToken.trim();
 
     // Prepare request body
+    // Send images as array (backend expects array)
+    const imagesArray = Array.isArray(productData.images) 
+      ? productData.images.filter(img => img && typeof img === 'string' && img.trim().length > 0)
+      : (productData.images ? [productData.images] : []);
+    
     const body = {
       sourceUrl: productData.sourceUrl,
       title: productData.title,
       description: productData.description,
-      images: Array.isArray(productData.images) ? productData.images.join(',') : productData.images,
+      images: imagesArray, // Send as array, not comma-separated string
       price: productData.price,
       category: productData.category,
     };

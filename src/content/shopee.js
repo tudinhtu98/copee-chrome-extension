@@ -63,23 +63,57 @@
 
       // Extract images - try multiple selectors
       const imageSelectors = [
+        // New Shopee selector for product images
+        '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.TMw1ot > div > div.UdI7e2 img',
+        // Alternative: try to find images within the container
+        '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS img',
+        // Fallback selectors
         '.product-gallery img',
         '.product-images img',
         '[data-testid="product-image"]',
         'img[src*="cf.shopee"]',
       ];
       
-      imageSelectors.forEach(selector => {
-        const images = document.querySelectorAll(selector);
-        images.forEach(img => {
-          const src = img.getAttribute('src') || img.getAttribute('data-src');
+      // Try new selector first
+      const newSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.TMw1ot > div > div.UdI7e2';
+      const imageContainer = document.querySelector(newSelector);
+      
+      if (imageContainer) {
+        console.log('[Copee] Found image container with new selector');
+        // Find all images within this container
+        const imagesInContainer = imageContainer.querySelectorAll('img');
+        imagesInContainer.forEach(img => {
+          const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
           if (src && !data.images.includes(src)) {
             // Convert thumbnail URL to full-size URL
-            const fullUrl = src.replace(/_tn\./, '.').replace(/_thumbnail\./, '.');
+            let fullUrl = src.replace(/_tn\./, '.').replace(/_thumbnail\./, '.').replace(/\/tn\//, '/');
+            // Remove size parameters if present
+            fullUrl = fullUrl.replace(/\?.*$/, '');
             data.images.push(fullUrl);
+            console.log('[Copee] Extracted image:', fullUrl);
           }
         });
-      });
+      }
+      
+      // Fallback to other selectors if no images found
+      if (data.images.length === 0) {
+        console.log('[Copee] No images found with new selector, trying fallback selectors');
+        imageSelectors.slice(2).forEach(selector => {
+          const images = document.querySelectorAll(selector);
+          images.forEach(img => {
+            const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+            if (src && !data.images.includes(src)) {
+              // Convert thumbnail URL to full-size URL
+              let fullUrl = src.replace(/_tn\./, '.').replace(/_thumbnail\./, '.').replace(/\/tn\//, '/');
+              // Remove size parameters if present
+              fullUrl = fullUrl.replace(/\?.*$/, '');
+              data.images.push(fullUrl);
+            }
+          });
+        });
+      }
+      
+      console.log('[Copee] Total images extracted:', data.images.length);
 
       // Extract description - Shopee specific selectors
       let description = '';
