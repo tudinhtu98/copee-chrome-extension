@@ -99,7 +99,8 @@ async function copyProductToCopee(productData) {
       title: productData.title,
       description: productData.description,
       images: imagesArray, // Send as array, not comma-separated string
-      price: productData.price,
+      price: productData.price, // Sale price (giá đã giảm)
+      originalPrice: productData.originalPrice, // Regular price (giá gốc)
       category: productData.category,
     };
 

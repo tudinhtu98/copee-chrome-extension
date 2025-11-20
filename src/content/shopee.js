@@ -25,11 +25,12 @@
         data.title = titleElement.textContent.trim();
       }
 
-      // Extract price - try multiple selectors
-      const priceSelectors = [
-        // New Shopee selector
+      // Extract prices - both original (giá gốc) and current/sale (giá đã giảm)
+      // Priority 1: Original price selector (giá gốc chưa giảm)
+      const originalPriceSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div > section > div > div.ZA5sW5';
+      // Priority 2: Current/discounted price selector (giá đã giảm)
+      const currentPriceSelectors = [
         '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div > section > div > div.IZPeQz.B67UQ0',
-        // Fallback selectors
         '[data-testid="product-price"]',
         '.product-price',
         '[content*="price"]',
@@ -37,28 +38,92 @@
         '.product-price-current',
       ];
       
-      let priceElement = null;
-      for (const selector of priceSelectors) {
-        priceElement = document.querySelector(selector);
-        if (priceElement) {
-          console.log('[Copee] Found price element with selector:', selector);
-          break;
+      // Helper function to extract price from text (handles price ranges)
+      const extractPriceFromText = (text) => {
+        if (!text) return null;
+        
+        // Handle price range (e.g., "70.000₫ - 215.000₫" or "70,000 - 215,000")
+        // Extract all numbers from the text
+        const numbers = text.match(/[\d.,]+/g);
+        
+        if (numbers && numbers.length > 0) {
+          // Convert all numbers to integers (remove dots, commas, etc.)
+          const prices = numbers.map(num => {
+            // Remove all non-digit characters
+            const cleaned = num.replace(/[^0-9]/g, '');
+            return parseInt(cleaned);
+          }).filter(price => !isNaN(price) && price > 0);
+          
+          if (prices.length > 0) {
+            // If multiple prices found (price range), use the lowest one
+            return Math.min(...prices);
+          }
+        }
+        
+        // Fallback: try to extract single price
+        const priceNum = parseInt(text.replace(/[^0-9]/g, ''));
+        if (!isNaN(priceNum) && priceNum > 0) {
+          return priceNum;
+        }
+        
+        return null;
+      };
+      
+      // Try to get original price first (giá gốc)
+      let originalPriceElement = document.querySelector(originalPriceSelector);
+      let originalPrice = null;
+      
+      if (originalPriceElement) {
+        const originalPriceText = originalPriceElement.textContent || originalPriceElement.getAttribute('content') || '';
+        console.log('[Copee] Found original price element, text:', originalPriceText);
+        originalPrice = extractPriceFromText(originalPriceText);
+        if (originalPrice) {
+          console.log('[Copee] Extracted original price:', originalPrice);
         }
       }
       
-      if (priceElement) {
-        const priceText = priceElement.textContent || priceElement.getAttribute('content') || '';
-        console.log('[Copee] Price text:', priceText);
-        // Remove non-numeric characters except dots
-        const priceNum = parseInt(priceText.replace(/[^0-9]/g, ''));
-        if (!isNaN(priceNum)) {
-          data.price = priceNum;
-          console.log('[Copee] Extracted price:', data.price);
-        } else {
-          console.warn('[Copee] Could not parse price from text:', priceText);
+      // Try to get current/discounted price (giá đã giảm)
+      let currentPriceElement = null;
+      let currentPrice = null;
+      
+      for (const selector of currentPriceSelectors) {
+        currentPriceElement = document.querySelector(selector);
+        if (currentPriceElement) {
+          console.log('[Copee] Found current price element with selector:', selector);
+          const priceText = currentPriceElement.textContent || currentPriceElement.getAttribute('content') || '';
+          console.log('[Copee] Current price text:', priceText);
+          currentPrice = extractPriceFromText(priceText);
+          if (currentPrice) {
+            console.log('[Copee] Extracted current price:', currentPrice);
+            break;
+          }
         }
-      } else {
-        console.warn('[Copee] Could not find price element with any selector');
+      }
+      
+      // Set prices: originalPrice (giá gốc) and price (giá đã giảm)
+      if (originalPrice) {
+        data.originalPrice = originalPrice;
+        console.log('[Copee] Using original price:', data.originalPrice);
+      }
+      
+      if (currentPrice) {
+        data.price = currentPrice;
+        console.log('[Copee] Using current/sale price:', data.price);
+      }
+      
+      // If we have original price but no current price, use original as current
+      if (originalPrice && !currentPrice) {
+        data.price = originalPrice;
+        console.log('[Copee] No sale price found, using original price as current:', data.price);
+      }
+      
+      // If we have current price but no original, original is null (no discount)
+      if (currentPrice && !originalPrice) {
+        console.log('[Copee] No original price found, product has no discount');
+      }
+      
+      if (!originalPrice && !currentPrice) {
+        console.warn('[Copee] Could not extract any price from page');
       }
 
       // Extract images - try multiple selectors
