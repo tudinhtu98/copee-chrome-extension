@@ -126,53 +126,130 @@
         console.warn('[Copee] Could not extract any price from page');
       }
 
-      // Extract images - try multiple selectors
+      // Extract images - try multiple selectors (skip videos)
+      // Helper function to normalize and check for duplicates
+      const normalizeImageUrl = (url) => {
+        if (!url) return null;
+        let normalized = url.replace(/_tn\./, '.').replace(/_thumbnail\./, '.').replace(/\/tn\//, '/');
+        normalized = normalized.replace(/\?.*$/, '');
+        return normalized;
+      };
+      
+      const addImageIfNotDuplicate = (url) => {
+        const normalized = normalizeImageUrl(url);
+        if (normalized && !data.images.includes(normalized)) {
+          data.images.push(normalized);
+          console.log('[Copee] Extracted image:', normalized);
+          return true;
+        }
+        return false;
+      };
+      
+      // Priority 1: Get all picture elements from div:nth-child(2) (skip video in div:nth-child(1))
+      const imageContainerSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.airUhU > div:nth-child(2)';
+      const imageContainer = document.querySelector(imageContainerSelector);
+      
+      if (imageContainer) {
+        console.log('[Copee] Found image container (div:nth-child(2)), extracting images');
+        
+        // Find all picture elements in this container
+        const pictureElements = imageContainer.querySelectorAll('picture');
+        const seenUrls = new Set(); // Track normalized URLs to prevent duplicates across all pictures
+        
+        pictureElements.forEach((picture) => {
+          let imageAdded = false;
+          
+          // Extract from img element first (highest priority)
+          const imgInPicture = picture.querySelector('img');
+          if (imgInPicture) {
+            const src = imgInPicture.getAttribute('src') || 
+                       imgInPicture.getAttribute('data-src') || 
+                       imgInPicture.getAttribute('data-lazy-src');
+            if (src) {
+              const normalized = normalizeImageUrl(src);
+              if (normalized && !seenUrls.has(normalized)) {
+                seenUrls.add(normalized);
+                data.images.push(normalized);
+                console.log('[Copee] Extracted image from picture:', normalized);
+                imageAdded = true;
+              }
+            }
+          }
+          
+          // If no img was added, try source elements (only if img not found or failed)
+          if (!imageAdded) {
+            const sources = picture.querySelectorAll('source');
+            for (const source of sources) {
+              const srcset = source.getAttribute('srcset');
+              if (srcset) {
+                // srcset format: "url1 size1, url2 size2" - take the first/largest URL
+                const firstUrl = srcset.split(',')[0].trim().split(' ')[0];
+                if (firstUrl) {
+                  const normalized = normalizeImageUrl(firstUrl);
+                  if (normalized && !seenUrls.has(normalized)) {
+                    seenUrls.add(normalized);
+                    data.images.push(normalized);
+                    console.log('[Copee] Extracted image from source:', normalized);
+                    imageAdded = true;
+                    break; // Only take first valid source per picture
+                  }
+                }
+              }
+            }
+          }
+        });
+        
+        // If no picture elements, try direct img elements (but skip videos)
+        if (data.images.length === 0) {
+          const allImages = imageContainer.querySelectorAll('img');
+          allImages.forEach(img => {
+            // Skip if image is inside a video element
+            const isVideo = img.closest('video') || 
+                           img.closest('[class*="video"]') ||
+                           img.closest('[data-testid*="video"]') ||
+                           img.getAttribute('data-video') === 'true';
+            
+            if (!isVideo) {
+              const src = img.getAttribute('src') || 
+                         img.getAttribute('data-src') || 
+                         img.getAttribute('data-lazy-src');
+              if (src) {
+                addImageIfNotDuplicate(src);
+              }
+            }
+          });
+        }
+      }
+      
+      // Fallback selectors
       const imageSelectors = [
-        // New Shopee selector for product images
         '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.TMw1ot > div > div.UdI7e2 img',
-        // Alternative: try to find images within the container
         '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS img',
-        // Fallback selectors
         '.product-gallery img',
         '.product-images img',
         '[data-testid="product-image"]',
         'img[src*="cf.shopee"]',
       ];
       
-      // Try new selector first
-      const newSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.TMw1ot > div > div.UdI7e2';
-      const imageContainer = document.querySelector(newSelector);
-      
-      if (imageContainer) {
-        console.log('[Copee] Found image container with new selector');
-        // Find all images within this container
-        const imagesInContainer = imageContainer.querySelectorAll('img');
-        imagesInContainer.forEach(img => {
-          const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-          if (src && !data.images.includes(src)) {
-            // Convert thumbnail URL to full-size URL
-            let fullUrl = src.replace(/_tn\./, '.').replace(/_thumbnail\./, '.').replace(/\/tn\//, '/');
-            // Remove size parameters if present
-            fullUrl = fullUrl.replace(/\?.*$/, '');
-            data.images.push(fullUrl);
-            console.log('[Copee] Extracted image:', fullUrl);
-          }
-        });
-      }
-      
-      // Fallback to other selectors if no images found
+      // Fallback to other selectors if no images found (skip videos)
       if (data.images.length === 0) {
-        console.log('[Copee] No images found with new selector, trying fallback selectors');
-        imageSelectors.slice(2).forEach(selector => {
+        console.log('[Copee] No images found with priority selectors, trying fallback selectors');
+        imageSelectors.forEach(selector => {
           const images = document.querySelectorAll(selector);
           images.forEach(img => {
-            const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-            if (src && !data.images.includes(src)) {
-              // Convert thumbnail URL to full-size URL
-              let fullUrl = src.replace(/_tn\./, '.').replace(/_thumbnail\./, '.').replace(/\/tn\//, '/');
-              // Remove size parameters if present
-              fullUrl = fullUrl.replace(/\?.*$/, '');
-              data.images.push(fullUrl);
+            // Skip if image is inside a video element
+            const isVideo = img.closest('video') || 
+                           img.closest('[class*="video"]') ||
+                           img.closest('[data-testid*="video"]') ||
+                           img.getAttribute('data-video') === 'true';
+            
+            if (!isVideo) {
+              const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+              if (src) {
+                addImageIfNotDuplicate(src);
+              }
+            } else {
+              console.log('[Copee] Skipped video element in fallback');
             }
           });
         });
