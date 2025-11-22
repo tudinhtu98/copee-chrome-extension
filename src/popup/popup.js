@@ -13,7 +13,7 @@ function loadProductData() {
   chrome.runtime.sendMessage({ action: 'getProduct' }, (response) => {
     if (chrome.runtime.lastError) {
       console.error('[Copee Popup] Error:', chrome.runtime.lastError);
-      renderEmptyState('Error loading product data. Please try again.');
+      renderEmptyState('Lỗi khi tải dữ liệu sản phẩm. Vui lòng thử lại.');
       return;
     }
     
@@ -111,11 +111,11 @@ async function handleCopyProduct() {
     const { apiEndpoint, authToken } = await chrome.storage.local.get(['apiEndpoint', 'authToken']);
 
     if (!apiEndpoint) {
-      throw new Error('API endpoint not configured. Please configure in Settings.');
+      throw new Error('API endpoint chưa được cấu hình. Vui lòng cấu hình trong Settings.');
     }
 
     if (!authToken) {
-      throw new Error('Auth token not configured. Please get your token from Copee Dashboard → User Settings and configure in extension Settings.');
+      throw new Error('Token chưa được cấu hình. Vui lòng lấy token từ Copee Dashboard → Cài đặt người dùng và cấu hình trong cài đặt extension.');
     }
 
     // Prepare request
@@ -145,7 +145,7 @@ async function handleCopyProduct() {
           // Check if response exists
           if (!response) {
             console.error('[Copee] No response received');
-            showStatus('No response from extension. Please try again.', 'error');
+            showStatus('Không nhận được phản hồi từ extension. Vui lòng thử lại.', 'error');
             copyBtn.disabled = false;
             copyBtn.textContent = 'Copy to Copee';
             return;
@@ -166,7 +166,7 @@ async function handleCopyProduct() {
               }
             }, 2000);
           } else {
-            const errorMsg = response?.error || 'Failed to copy product';
+            const errorMsg = response?.error || 'Không thể copy sản phẩm';
             console.error('[Copee] Copy failed:', errorMsg);
             showStatus(errorMsg, 'error');
             copyBtn.disabled = false;
@@ -176,7 +176,7 @@ async function handleCopyProduct() {
       );
     } catch (error) {
       console.error('[Copee] Send message error:', error);
-      showStatus(error.message || 'Failed to send request', 'error');
+      showStatus(error.message || 'Không thể gửi request', 'error');
       copyBtn.disabled = false;
       copyBtn.textContent = 'Copy to Copee';
     }
