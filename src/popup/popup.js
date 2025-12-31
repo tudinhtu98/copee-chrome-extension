@@ -56,10 +56,10 @@ function renderProductData(product) {
     <div id="status-message"></div>
     <button id="copy-btn" class="btn btn-primary">Copy to Copee</button>
     <a href="${settingsUrl}" target="_blank" class="settings-link">
-      Settings →
+      Cài đặt →
     </a>
-    <a href="http://localhost:3000/dashboard/products" target="_blank" class="settings-link">
-      View in Dashboard →
+    <a href="https://app.copee.vn/dashboard/products" target="_blank" class="settings-link">
+      Mở Dashboard Copee →
     </a>
   `;
 
@@ -79,7 +79,7 @@ function renderEmptyState(message) {
     <a href="${settingsUrl}" target="_blank" class="settings-link">
       Configure Settings →
     </a>
-    <a href="http://localhost:3000" target="_blank" class="settings-link">
+    <a href="https://app.copee.vn" target="_blank" class="settings-link">
       Open Copee Dashboard →
     </a>
   `;

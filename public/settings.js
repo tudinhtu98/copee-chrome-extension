@@ -14,7 +14,7 @@ function loadSettings() {
     if (result.apiEndpoint) {
       document.getElementById('api-endpoint').value = result.apiEndpoint;
     } else {
-      document.getElementById('api-endpoint').value = 'http://localhost:3000';
+      document.getElementById('api-endpoint').value = 'https://app.copee.vn';
     }
     
     if (result.authToken) {

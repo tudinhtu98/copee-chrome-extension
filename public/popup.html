@@ -29,13 +29,15 @@
     .logo {
       width: 32px;
       height: 32px;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      border-radius: 8px;
       display: flex;
       align-items: center;
       justify-content: center;
-      color: white;
-      font-weight: bold;
+    }
+
+    .logo img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
     }
 
     .title {
@@ -158,7 +160,9 @@
 </head>
 <body>
   <div class="header">
-    <div class="logo">C</div>
+    <div class="logo">
+      <img src="icons/icon128.png" alt="Copee Logo">
+    </div>
     <div class="title">Copee</div>
   </div>
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Copee - Shopee Product Copier",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "Copy products from Shopee to Copee web app with one click",
   "permissions": [
     "storage",
@@ -11,7 +11,7 @@
   "host_permissions": [
     "https://shopee.vn/*",
     "https://*.copee.local/*",
-    "http://localhost:3000/*"
+    "https://app.copee.vn/*"
   ],
   "background": {
     "service_worker": "src/background/background.js"
