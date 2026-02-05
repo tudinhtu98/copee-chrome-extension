@@ -27,10 +27,10 @@
 
       // Extract prices - both original (giá gốc) and current/sale (giá đã giảm)
       // Priority 1: Original price selector (giá gốc chưa giảm)
-      const originalPriceSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div > section > div > div.ZA5sW5';
+      const originalPriceSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div.flex.flex-column.IFdRIb > section > div > div.ZA5sW5';
       // Priority 2: Current/discounted price selector (giá đã giảm)
       const currentPriceSelectors = [
-        '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div > section > div > div.IZPeQz.B67UQ0',
+        '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div.flex.flex-column.IFdRIb > section > div > div.IZPeQz.B67UQ0',
         '[data-testid="product-price"]',
         '.product-price',
         '[content*="price"]',
@@ -121,141 +121,134 @@
       if (currentPrice && !originalPrice) {
         console.log('[Copee] No original price found, product has no discount');
       }
-      
-      if (!originalPrice && !currentPrice) {
-        console.warn('[Copee] Could not extract any price from page');
+
+      // Extract images from Shopee product page
+      // Structure: div.TMw1ot contains thumbnail list with ALL product images
+      // Each image: div.UdI7e2 > picture > img
+      // Skip video elements
+
+      // Helper function to extract unique file ID from Shopee image URL
+      const extractFileId = (url) => {
+        if (!url) return null;
+        const fileMatch = url.match(/\/file\/([a-zA-Z0-9-_]+)/);
+        if (fileMatch) return fileMatch[1];
+        return url.split('?')[0];
+      };
+
+      const seenFileIds = new Set();
+
+      const addUniqueImage = (url) => {
+        if (!url) return false;
+        // Must be Shopee CDN URL
+        if (!url.includes('susercontent.com') && !url.includes('cf.shopee')) return false;
+
+        const fileId = extractFileId(url);
+        if (!fileId || seenFileIds.has(fileId)) return false;
+
+        seenFileIds.add(fileId);
+        const cleanUrl = url.split('?')[0];
+        data.images.push(cleanUrl);
+        console.log('[Copee] Added image:', cleanUrl);
+        return true;
+      };
+
+      console.log('[Copee] Starting image extraction');
+
+      // Strategy 1: Get ALL images from thumbnail list (div.TMw1ot)
+      // This contains all product images as thumbnails
+      const thumbnailListSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.TMw1ot';
+      const thumbnailList = document.querySelector(thumbnailListSelector);
+
+      if (thumbnailList) {
+        console.log('[Copee] Found thumbnail list container');
+
+        // Get all child divs (each represents one image or video)
+        const itemDivs = thumbnailList.querySelectorAll(':scope > div');
+        console.log('[Copee] Found', itemDivs.length, 'items in thumbnail list');
+
+        // Helper function to check if an element contains actual video
+        // STRICT: only detect actual video elements, not class names
+        const checkForVideo = (element) => {
+          // Check for actual video element only
+          if (element.querySelector('video')) {
+            console.log('[Copee] Found actual <video> element');
+            return true;
+          }
+          return false;
+        };
+
+        // Extract images (skip video items)
+        itemDivs.forEach((itemDiv, index) => {
+          // Check if this item contains a video (skip it)
+          if (checkForVideo(itemDiv)) {
+            console.log('[Copee] Skipping video at index', index);
+            return;
+          }
+
+          // Find image in this item: div.UdI7e2 > picture > img
+          const img = itemDiv.querySelector('div.UdI7e2 picture img') ||
+                     itemDiv.querySelector('picture img') ||
+                     itemDiv.querySelector('img');
+
+          if (img) {
+            const src = img.getAttribute('src') ||
+                       img.getAttribute('data-src') ||
+                       img.getAttribute('data-lazy-src');
+            if (src) {
+              addUniqueImage(src);
+            }
+          }
+        });
+      } else {
+        console.log('[Copee] Thumbnail list not found, trying alternative selectors');
       }
 
-      // Extract images - try multiple selectors (skip videos)
-      // Helper function to normalize and check for duplicates
-      const normalizeImageUrl = (url) => {
-        if (!url) return null;
-        let normalized = url.replace(/_tn\./, '.').replace(/_thumbnail\./, '.').replace(/\/tn\//, '/');
-        normalized = normalized.replace(/\?.*$/, '');
-        return normalized;
-      };
-      
-      const addImageIfNotDuplicate = (url) => {
-        const normalized = normalizeImageUrl(url);
-        if (normalized && !data.images.includes(normalized)) {
-          data.images.push(normalized);
-          console.log('[Copee] Extracted image:', normalized);
-          return true;
-        }
-        return false;
-      };
-      
-      // Priority 1: Get all picture elements from div:nth-child(2) (skip video in div:nth-child(1))
-      const imageContainerSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.airUhU > div:nth-child(2)';
-      const imageContainer = document.querySelector(imageContainerSelector);
-      
-      if (imageContainer) {
-        console.log('[Copee] Found image container (div:nth-child(2)), extracting images');
-        
-        // Find all picture elements in this container
-        const pictureElements = imageContainer.querySelectorAll('picture');
-        const seenUrls = new Set(); // Track normalized URLs to prevent duplicates across all pictures
-        
-        pictureElements.forEach((picture) => {
-          let imageAdded = false;
-          
-          // Extract from img element first (highest priority)
-          const imgInPicture = picture.querySelector('img');
-          if (imgInPicture) {
-            const src = imgInPicture.getAttribute('src') || 
-                       imgInPicture.getAttribute('data-src') || 
-                       imgInPicture.getAttribute('data-lazy-src');
-            if (src) {
-              const normalized = normalizeImageUrl(src);
-              if (normalized && !seenUrls.has(normalized)) {
-                seenUrls.add(normalized);
-                data.images.push(normalized);
-                console.log('[Copee] Extracted image from picture:', normalized);
-                imageAdded = true;
-              }
-            }
-          }
-          
-          // If no img was added, try source elements (only if img not found or failed)
-          if (!imageAdded) {
-            const sources = picture.querySelectorAll('source');
-            for (const source of sources) {
-              const srcset = source.getAttribute('srcset');
-              if (srcset) {
-                // srcset format: "url1 size1, url2 size2" - take the first/largest URL
-                const firstUrl = srcset.split(',')[0].trim().split(' ')[0];
-                if (firstUrl) {
-                  const normalized = normalizeImageUrl(firstUrl);
-                  if (normalized && !seenUrls.has(normalized)) {
-                    seenUrls.add(normalized);
-                    data.images.push(normalized);
-                    console.log('[Copee] Extracted image from source:', normalized);
-                    imageAdded = true;
-                    break; // Only take first valid source per picture
-                  }
-                }
-              }
-            }
-          }
-        });
-        
-        // If no picture elements, try direct img elements (but skip videos)
-        if (data.images.length === 0) {
-          const allImages = imageContainer.querySelectorAll('img');
-          allImages.forEach(img => {
-            // Skip if image is inside a video element
-            const isVideo = img.closest('video') || 
-                           img.closest('[class*="video"]') ||
-                           img.closest('[data-testid*="video"]') ||
-                           img.getAttribute('data-video') === 'true';
-            
-            if (!isVideo) {
-              const src = img.getAttribute('src') || 
-                         img.getAttribute('data-src') || 
-                         img.getAttribute('data-lazy-src');
-              if (src) {
-                addImageIfNotDuplicate(src);
-              }
-            }
-          });
-        }
-      }
-      
-      // Fallback selectors
-      const imageSelectors = [
-        '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.TMw1ot > div > div.UdI7e2 img',
-        '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS img',
-        '.product-gallery img',
-        '.product-images img',
-        '[data-testid="product-image"]',
-        'img[src*="cf.shopee"]',
-      ];
-      
-      // Fallback to other selectors if no images found (skip videos)
+      // Strategy 2: Fallback - try main image container (div.airUhU)
       if (data.images.length === 0) {
-        console.log('[Copee] No images found with priority selectors, trying fallback selectors');
-        imageSelectors.forEach(selector => {
-          const images = document.querySelectorAll(selector);
-          images.forEach(img => {
-            // Skip if image is inside a video element
-            const isVideo = img.closest('video') || 
-                           img.closest('[class*="video"]') ||
-                           img.closest('[data-testid*="video"]') ||
-                           img.getAttribute('data-video') === 'true';
-            
-            if (!isVideo) {
-              const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-              if (src) {
-                addImageIfNotDuplicate(src);
-              }
-            } else {
-              console.log('[Copee] Skipped video element in fallback');
+        const mainContainerSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.airUhU';
+        const mainContainer = document.querySelector(mainContainerSelector);
+
+        if (mainContainer) {
+          console.log('[Copee] Found main image container, extracting from child divs');
+
+          const childDivs = mainContainer.querySelectorAll(':scope > div');
+
+          childDivs.forEach((childDiv, index) => {
+            // Skip video - only check for actual video element
+            if (childDiv.querySelector('video')) {
+              console.log('[Copee] Skipping video at index', index);
+              return;
+            }
+
+            const img = childDiv.querySelector('picture img') || childDiv.querySelector('img');
+            if (img) {
+              const src = img.getAttribute('src') || img.getAttribute('data-src');
+              if (src) addUniqueImage(src);
             }
           });
+        }
+      }
+
+      // Strategy 3: Last resort - find all Shopee product images on page
+      if (data.images.length === 0) {
+        console.log('[Copee] No images found, scanning entire page for Shopee images');
+
+        const allImgs = document.querySelectorAll('img[src*="susercontent.com"], img[src*="cf.shopee"]');
+        allImgs.forEach(img => {
+          // Skip if inside a video element
+          if (img.closest('video')) return;
+
+          const src = img.getAttribute('src');
+          if (src && src.includes('/file/')) {
+            addUniqueImage(src);
+          }
         });
       }
-      
+
       console.log('[Copee] Total images extracted:', data.images.length);
+      if (data.images.length > 0) {
+        console.log('[Copee] Images:', data.images);
+      }
 
       // Extract description - Shopee specific selectors
       let description = '';
@@ -745,6 +738,18 @@
   observer.observe(document.body, {
     childList: true,
     subtree: true
+  });
+
+  // Listen for messages from popup to re-extract
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'extractProduct') {
+      console.log('[Copee] Received extractProduct request from popup');
+      // Reset extraction attempts and re-extract
+      extractionAttempts = 0;
+      tryExtractWithRetry();
+      sendResponse({ success: true });
+    }
+    return true;
   });
 
   console.log('Copee: Product data extractor loaded');
