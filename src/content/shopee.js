@@ -252,10 +252,33 @@
 
       // Extract description - Shopee specific selectors
       let description = '';
-      
-      // Strategy 1: Use the exact selector for Shopee product description
-      // #sll2-normal-pdp-main > ... > div.product-detail.page-product__detail > section:nth-child(2) > div
+
+      // Strategy 0 (Priority): Try the new exact selector for some products
+      // #sll2-normal-pdp-main > div > div > div > div.container > div.wAMdpk > div > div.page-product__content--left > div.product-detail.page-product__detail > section:nth-child(4) > div > div > div
       try {
+        const prioritySelector = '#sll2-normal-pdp-main > div > div > div > div.container > div.wAMdpk > div > div.page-product__content--left > div.product-detail.page-product__detail > section:nth-child(4) > div > div > div';
+        const priorityDescDiv = document.querySelector(prioritySelector);
+
+        if (priorityDescDiv) {
+          console.log('[Copee] Found priority description selector (section:nth-child(4))');
+          const divClone = priorityDescDiv.cloneNode(true);
+          divClone.querySelectorAll('h2').forEach(h2 => h2.remove());
+          let descriptionText = divClone.innerText || divClone.textContent || '';
+          descriptionText = descriptionText.trim();
+
+          if (descriptionText.length > 50) {
+            description = descriptionText;
+            console.log('[Copee] Description extracted from priority selector, length:', description.length);
+          }
+        }
+      } catch (error) {
+        console.error('[Copee] Error with priority description selector:', error);
+      }
+
+      // Strategy 1: Use the exact selector for Shopee product description (fallback)
+      // #sll2-normal-pdp-main > ... > div.product-detail.page-product__detail > section:nth-child(2) > div
+      if (!description || description.trim().length < 50) {
+        try {
         // Try the exact full selector first
         const exactSelector = 'div.page-product__content--left > div.product-detail.page-product__detail > section:nth-child(2) > div';
         let descriptionDiv = document.querySelector(exactSelector);
@@ -317,9 +340,10 @@
           console.log('[Copee] Description div not found with any selector');
         }
       } catch (error) {
-        console.error('[Copee] Error extracting description:', error);
+          console.error('[Copee] Error extracting description:', error);
+        }
       }
-      
+
       // Strategy 2: Fallback - Find the main product description container
       if (!description || description.trim().length < 100) {
         const mainDescriptionSelectors = [
