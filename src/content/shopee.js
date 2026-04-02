@@ -4,6 +4,25 @@
 (function() {
   'use strict';
 
+  // Convert DOM element to text preserving line breaks
+  function extractTextWithLineBreaks(element) {
+    const clone = element.cloneNode(true);
+    // Insert newline before block-level elements and <br>
+    clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+    clone.querySelectorAll('div, p, li, tr, h1, h2, h3, h4, h5, h6').forEach(el => {
+      el.prepend('\n');
+    });
+    let text = clone.textContent || '';
+    // Normalize: collapse spaces (not newlines), trim each line
+    text = text
+      .split('\n')
+      .map(line => line.replace(/[ \t]+/g, ' ').trim())
+      .join('\n');
+    // Collapse 3+ newlines into 2
+    text = text.replace(/\n{3,}/g, '\n\n').trim();
+    return text;
+  }
+
   // Extract product data from Shopee page
   function extractProductData() {
     // Get URL without query parameters
@@ -263,8 +282,7 @@
           console.log('[Copee] Found priority description selector (section:nth-child(4))');
           const divClone = priorityDescDiv.cloneNode(true);
           divClone.querySelectorAll('h2').forEach(h2 => h2.remove());
-          let descriptionText = divClone.innerText || divClone.textContent || '';
-          descriptionText = descriptionText.trim();
+          let descriptionText = extractTextWithLineBreaks(divClone);
 
           if (descriptionText.length > 50) {
             description = descriptionText;
@@ -320,15 +338,12 @@
           
           // Clone to avoid modifying original
           const divClone = descriptionDiv.cloneNode(true);
-          
+
           // Remove h2 tags if any
           divClone.querySelectorAll('h2').forEach(h2 => h2.remove());
-          
-          // Get text content
-          let descriptionText = divClone.innerText || divClone.textContent || '';
-          
-          // Clean up
-          descriptionText = descriptionText.trim();
+
+          // Get text content preserving line breaks
+          let descriptionText = extractTextWithLineBreaks(divClone);
           
           if (descriptionText.length > 50) {
             description = descriptionText;
@@ -359,7 +374,7 @@
         for (const selector of mainDescriptionSelectors) {
           const elements = document.querySelectorAll(selector);
           for (const element of elements) {
-            const text = element.innerText || element.textContent || '';
+            const text = extractTextWithLineBreaks(element);
             // Look for substantial content (at least 100 chars, not just headers)
             if (text.trim().length > 100 && 
                 !text.match(/^(Mô tả sản phẩm|Thông tin sản phẩm|Chi tiết sản phẩm)\s*:?\s*$/i)) {
@@ -393,7 +408,7 @@
                              !element.classList.contains('hidden');
             
             if (isVisible) {
-              const text = element.innerText || element.textContent || '';
+              const text = extractTextWithLineBreaks(element);
               if (text.trim().length > description.length && 
                   text.trim().length > 200 &&
                   !text.match(/^(Mô tả sản phẩm|Thông tin sản phẩm)\s*:?\s*$/i)) {
@@ -409,7 +424,7 @@
         // Look for divs that contain product description text
         const allDivs = document.querySelectorAll('div');
         for (const div of allDivs) {
-          const text = div.innerText || div.textContent || '';
+          const text = extractTextWithLineBreaks(div);
           // Check if this div looks like a description container
           // (has substantial text, not just a header)
           if (text.trim().length > 300 && 
@@ -443,15 +458,14 @@
             
             // Remove unwanted elements
             tempDiv.querySelectorAll('script, style, nav, header, footer, button, .btn, a[href*="category"]').forEach(el => el.remove());
-            
-            let text = tempDiv.innerText || tempDiv.textContent || '';
-            
+
+            let text = extractTextWithLineBreaks(tempDiv);
+
             // Clean up
             text = text
               .replace(/Mô tả sản phẩm\s*:?\s*/gi, '')
               .replace(/Thông tin sản phẩm\s*:?\s*/gi, '')
               .replace(/Chi tiết sản phẩm\s*:?\s*/gi, '')
-              .replace(/\s+/g, ' ')
               .trim();
             
             if (text.length > description.length && text.length > 200) {
@@ -468,7 +482,6 @@
           .replace(/^Thông tin sản phẩm\s*:?\s*/i, '')
           .replace(/^Chi tiết sản phẩm\s*:?\s*/i, '')
           .replace(/\n{3,}/g, '\n\n') // Normalize line breaks
-          .replace(/\s+/g, ' ') // Normalize spaces
           .trim();
         
         // Limit length
