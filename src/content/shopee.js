@@ -1,787 +1,646 @@
 // Content script for Shopee product pages
 // Extracts product data and injects Copee copy button
+//
+// GIÁ + ẢNH: nhận diện theo thứ tự ưu tiên các nguồn ỔN ĐỊNH (không phụ thuộc
+// class CSS bị Shopee băm/đổi theo phiên bản):
+//   1. API nội bộ Shopee  /api/v4/pdp/get_pc  (cùng origin, mang cookie) -> bền nhất
+//   2. JSON-LD  <script type="application/ld+json"> Product schema
+//   3. OG meta tag + quét ảnh CDN susercontent.com  (cứu cánh cuối)
+// MÔ TẢ + DANH MỤC: vẫn dùng class ngữ nghĩa (product-detail / breadcrumb) vốn ổn định.
 
 (function() {
   'use strict';
 
+  // ============================================================
+  // Helpers chung
+  // ============================================================
+
   // Convert DOM element to text preserving line breaks
   function extractTextWithLineBreaks(element) {
     const clone = element.cloneNode(true);
-    // Insert newline before block-level elements and <br>
     clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
     clone.querySelectorAll('div, p, li, tr, h1, h2, h3, h4, h5, h6').forEach(el => {
       el.prepend('\n');
     });
     let text = clone.textContent || '';
-    // Normalize: collapse spaces (not newlines), trim each line
     text = text
       .split('\n')
       .map(line => line.replace(/[ \t]+/g, ' ').trim())
       .join('\n');
-    // Collapse 3+ newlines into 2
     text = text.replace(/\n{3,}/g, '\n\n').trim();
     return text;
   }
 
-  // Extract product data from Shopee page
-  function extractProductData() {
-    // Get URL without query parameters
-    const sourceUrl = window.location.origin + window.location.pathname;
-    
-    const data = {
-      title: '',
-      price: 0,
-      images: [],
-      description: '',
-      category: '',
-      sourceUrl: sourceUrl,
+  // Lấy shopId / itemId từ URL Shopee dạng .../ten-san-pham-i.{shopId}.{itemId}
+  function getShopeeIds() {
+    const m = window.location.pathname.match(/-i\.(\d+)\.(\d+)/);
+    if (m) return { shopId: m[1], itemId: m[2] };
+    return null;
+  }
+
+  // Dựng URL ảnh CDN từ hash (hoặc trả nguyên nếu đã là URL đầy đủ)
+  function shopeeImageUrl(hashOrUrl) {
+    if (!hashOrUrl) return null;
+    if (hashOrUrl.startsWith('http')) return hashOrUrl.split('?')[0];
+    return `https://down-vn.img.susercontent.com/file/${hashOrUrl}`;
+  }
+
+  // Thêm ảnh vào data.images, khử trùng lặp theo hash/file id
+  function makeImageAdder(data) {
+    const seen = new Set();
+    function addImage(hashOrUrl) {
+      const url = shopeeImageUrl(hashOrUrl);
+      if (!url) return false;
+      const idMatch = url.match(/\/file\/([a-zA-Z0-9-_]+)/);
+      const key = idMatch ? idMatch[1] : url;
+      // Ảnh cover của VIDEO (hash kết thúc _cover) -> không phải ảnh sản phẩm, bỏ
+      if (key.endsWith('_cover') || key.includes('_cover@')) return false;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      data.images.push(url);
+      return true;
+    }
+    addImage.__count = () => data.images.length;
+    return addImage;
+  }
+
+  // ============================================================
+  // NGUỒN 1: API nội bộ Shopee (ưu tiên cao nhất cho GIÁ + ẢNH)
+  // ============================================================
+
+  async function fetchShopeeApiItem(ids) {
+    const url = `https://shopee.vn/api/v4/pdp/get_pc?item_id=${ids.itemId}&shop_id=${ids.shopId}&detail_level=0`;
+    const res = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+      headers: {
+        'accept': 'application/json',
+        'x-api-source': 'pc',
+        'x-shopee-language': 'vi',
+        'x-requested-with': 'XMLHttpRequest',
+        'af-ac-enc-dat': '',
+      },
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const json = await res.json();
+    // Shopee thường trả HTTP 200 kèm error trong body khi bị chặn anti-bot
+    if (json && json.error) {
+      throw new Error('API error=' + json.error + ' ' + (json.error_msg || ''));
+    }
+    // Cấu trúc: { data: { item: {...} } }  (một số phiên bản trả thẳng { item })
+    const item = json?.data?.item || json?.item || json?.data;
+    if (!item || (item.price == null && item.price_min == null && !item.title)) {
+      throw new Error('No item in API response');
+    }
+    return item;
+  }
+
+  // Giá trong API Shopee được nhân 100000 (micro-unit) -> chia lại ra VND
+  function shopeePriceToVnd(raw) {
+    if (raw == null) return null;
+    const n = Number(raw);
+    if (!isFinite(n) || n <= 0) return null;
+    return Math.round(n / 100000);
+  }
+
+  function applyApiItem(item, data, addImage) {
+    if (item.title && !data.title) data.title = String(item.title).trim();
+
+    // Giá hiện tại (đã giảm): ưu tiên price, sau đó price_min
+    const current = shopeePriceToVnd(item.price) ?? shopeePriceToVnd(item.price_min);
+    // Giá gốc (trước giảm)
+    const before = shopeePriceToVnd(item.price_before_discount);
+
+    if (current) data.price = current;
+    if (before && (!current || before > current)) data.originalPrice = before;
+    // Có giá gốc mà không có giá hiện tại -> dùng giá gốc làm hiện tại
+    if (before && !current) data.price = before;
+
+    // Ảnh: item.images là mảng hash đầy đủ; item.image là ảnh chính
+    const imgs = Array.isArray(item.images) && item.images.length
+      ? item.images
+      : (item.image ? [item.image] : []);
+    imgs.forEach(addImage);
+
+    console.log('[Copee] API item ->', {
+      title: data.title, price: data.price, originalPrice: data.originalPrice,
+      images: data.images.length,
+    });
+  }
+
+  // ============================================================
+  // NGUỒN 2: JSON-LD (Product schema)
+  // ============================================================
+
+  function applyJsonLd(data, addImage) {
+    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (const script of scripts) {
+      let parsed;
+      try { parsed = JSON.parse(script.textContent); } catch (e) { continue; }
+
+      // Có thể là object đơn, mảng, hoặc @graph
+      const candidates = [];
+      const collect = (node) => {
+        if (!node) return;
+        if (Array.isArray(node)) { node.forEach(collect); return; }
+        if (node['@graph']) collect(node['@graph']);
+        candidates.push(node);
+      };
+      collect(parsed);
+
+      const product = candidates.find(n => {
+        const t = n && n['@type'];
+        return t === 'Product' || (Array.isArray(t) && t.includes('Product'));
+      });
+      if (!product) continue;
+
+      if (product.name && !data.title) data.title = String(product.name).trim();
+
+      // Ảnh: string | array
+      if (product.image) {
+        const imgs = Array.isArray(product.image) ? product.image : [product.image];
+        imgs.forEach(addImage);
+      }
+
+      // Giá: offers có thể là Offer hoặc AggregateOffer
+      const offers = product.offers;
+      const offerList = Array.isArray(offers) ? offers : (offers ? [offers] : []);
+      for (const offer of offerList) {
+        const price = Number(offer.price ?? offer.lowPrice);
+        const high = Number(offer.highPrice);
+        if (isFinite(price) && price > 0 && !data.price) data.price = Math.round(price);
+        if (isFinite(high) && high > 0 && data.price && high > data.price) {
+          data.originalPrice = Math.round(high);
+        }
+      }
+      console.log('[Copee] JSON-LD ->', {
+        title: data.title, price: data.price, images: data.images.length,
+      });
+      return; // đã tìm thấy Product
+    }
+  }
+
+  // ============================================================
+  // NGUỒN 3: OG meta + quét ảnh trên trang (cứu cánh cuối)
+  // ============================================================
+
+  function metaContent(selectors) {
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      const c = el && (el.getAttribute('content') || el.getAttribute('value'));
+      if (c && c.trim()) return c.trim();
+    }
+    return null;
+  }
+
+  function applyMetaAndDom(data, addImage) {
+    if (!data.title) {
+      const t = metaContent(['meta[property="og:title"]', 'meta[name="twitter:title"]']) ||
+                (document.querySelector('h1')?.textContent || '').trim();
+      if (t) data.title = t;
+    }
+
+    if (!data.price) {
+      const p = metaContent([
+        'meta[property="product:price:amount"]',
+        'meta[itemprop="price"]',
+        'meta[property="og:price:amount"]',
+      ]);
+      const n = p ? parseInt(p.replace(/[^0-9]/g, ''), 10) : NaN;
+      if (isFinite(n) && n > 0) data.price = n;
+    }
+
+    // Nếu vẫn chưa có giá: quét text chứa '₫' gần đầu trang
+    if (!data.price) {
+      const priceRegex = /(\d[\d.,]*)\s*(?:₫|đ|VND)/i;
+      const nodes = document.querySelectorAll('div, span');
+      for (const node of nodes) {
+        if (node.children.length > 3) continue; // chỉ node lá chứa text giá
+        const m = (node.textContent || '').match(priceRegex);
+        if (m) {
+          const n = parseInt(m[1].replace(/[^0-9]/g, ''), 10);
+          if (isFinite(n) && n >= 1000) { data.price = n; break; }
+        }
+      }
+    }
+
+    // Ảnh chính từ og:image
+    if (data.images.length === 0) {
+      const ogImg = metaContent(['meta[property="og:image"]', 'meta[name="twitter:image"]']);
+      if (ogImg) addImage(ogImg);
+    }
+
+    // Quét toàn trang các ảnh CDN Shopee (không phụ thuộc class)
+    if (data.images.length === 0) {
+      document.querySelectorAll('img[src*="susercontent.com"], img[src*="cf.shopee"]').forEach(img => {
+        if (img.closest('video')) return;
+        const src = img.getAttribute('src');
+        if (src && src.includes('/file/')) addImage(src);
+      });
+    }
+  }
+
+  // Gom ảnh GALLERY từ DOM (chỉ dùng bù khi API Shopee bị chặn).
+  // Quét rộng nhưng loại nhiễu bằng 2 dấu hiệu ỔN ĐỊNH:
+  //   (a) chỉ lấy ảnh nằm TRÊN phần mô tả/đánh giá  -> bỏ review & sản phẩm gợi ý
+  //   (b) bỏ ảnh nằm trong LINK điều hướng (a[href])-> bỏ avatar/logo shop,
+  //       vì thumbnail gallery KHÔNG phải link (bấm vào chỉ đổi ảnh chính).
+  function collectGalleryImages(addImage) {
+    const startCount = addImage.__count();
+
+    // Mốc ranh giới dưới của gallery = phần mô tả / khu đánh giá (nằm dưới gallery)
+    const boundary = document.querySelector(
+      'div.product-detail.page-product__detail, [class*="product-rating"], ' +
+      '[class*="product-comment"], .product-ratings, [class*="rating-overview"]'
+    );
+    const beforeBoundary = (el) => {
+      if (!boundary) return true;
+      return !!(boundary.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING);
     };
 
+    const isBad = (el) => {
+      if (!beforeBoundary(el)) return true; // nằm dưới mô tả/đánh giá
+      if (el.closest('[class*="rating" i], [class*="comment" i], [class*="review" i]')) return true;
+      const a = el.closest('a[href]');
+      if (a) {
+        const href = a.getAttribute('href') || '';
+        // link điều hướng thật (avatar/logo shop, sản phẩm gợi ý) -> bỏ.
+        // Thumbnail gallery không có href thật (# hoặc javascript) nên vẫn giữ.
+        if (href && href !== '#' && !href.startsWith('javascript')) return true;
+      }
+      return false;
+    };
+
+    const pushFromNode = (node) => {
+      if (isBad(node)) return;
+      const img = node.tagName === 'IMG' ? node : node.querySelector('img');
+      const srcs = [];
+      if (img) srcs.push(img.getAttribute('src'), img.getAttribute('data-src'), img.getAttribute('data-lazy-src'));
+      if (node.querySelectorAll) {
+        node.querySelectorAll('source').forEach(s => {
+          const ss = s.getAttribute('srcset');
+          if (ss) srcs.push(ss.split(',')[0].trim().split(' ')[0]);
+        });
+      }
+      srcs.forEach(src => {
+        if (src && src.includes('susercontent.com') && src.includes('/file/')) addImage(src);
+      });
+    };
+
+    // CHỈ lấy ảnh trong <picture> (ảnh chính + thumbnail đều nằm trong <picture>).
+    // Ảnh <img> trần ngoài <picture> là overlay (class ZUEJdQ) -> không lấy.
+    document.querySelectorAll('picture').forEach(pushFromNode);
+
+    document.querySelectorAll('[style*="susercontent.com"]').forEach(el => {
+      if (isBad(el)) return;
+      const m = (el.getAttribute('style') || '').match(/url\(["']?([^"')]+susercontent\.com[^"')]+)["']?\)/);
+      if (m && m[1].includes('/file/')) addImage(m[1]);
+    });
+
+    console.log('[Copee] Gallery DOM ->', {
+      co_boundary: !!boundary, thu_them: addImage.__count() - startCount,
+    });
+  }
+
+  // ============================================================
+  // MÔ TẢ (giữ nguyên logic cũ, dựa vào class ngữ nghĩa ổn định)
+  // ============================================================
+
+  function extractDescription() {
+    let description = '';
+
+    // Strategy 0: selector ưu tiên (section:nth-child(4))
     try {
-      // Extract title - try multiple selectors
-      const titleElement = document.querySelector('h1.product-intro__head-name, [data-testid="product-title"], .product-title, h1');
-      if (titleElement) {
-        data.title = titleElement.textContent.trim();
+      const prioritySelector = '#sll2-normal-pdp-main > div > div > div > div.container > div.wAMdpk > div > div.page-product__content--left > div.product-detail.page-product__detail > section:nth-child(4) > div > div > div';
+      const priorityDescDiv = document.querySelector(prioritySelector);
+      if (priorityDescDiv) {
+        const divClone = priorityDescDiv.cloneNode(true);
+        divClone.querySelectorAll('h2').forEach(h2 => h2.remove());
+        const t = extractTextWithLineBreaks(divClone);
+        if (t.length > 50) description = t;
       }
+    } catch (e) { /* noop */ }
 
-      // Extract prices - both original (giá gốc) and current/sale (giá đã giảm)
-      // Priority 1: Original price selector (giá gốc chưa giảm)
-      const originalPriceSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div.flex.flex-column.IFdRIb > section > div > div.ZA5sW5';
-      // Priority 2: Current/discounted price selector (giá đã giảm)
-      const currentPriceSelectors = [
-        '#sll2-normal-pdp-main > div > div > div > div.container > section > section.flex.flex-auto.YTDXQ0 > div > div:nth-child(3) > div.flex.flex-column.IFdRIb > section > div > div.IZPeQz.B67UQ0',
-        '[data-testid="product-price"]',
-        '.product-price',
-        '[content*="price"]',
-        '.product-intro__head-price',
-        '.product-price-current',
-      ];
-      
-      // Helper function to extract price from text (handles price ranges)
-      const extractPriceFromText = (text) => {
-        if (!text) return null;
-        
-        // Handle price range (e.g., "70.000₫ - 215.000₫" or "70,000 - 215,000")
-        // Extract all numbers from the text
-        const numbers = text.match(/[\d.,]+/g);
-        
-        if (numbers && numbers.length > 0) {
-          // Convert all numbers to integers (remove dots, commas, etc.)
-          const prices = numbers.map(num => {
-            // Remove all non-digit characters
-            const cleaned = num.replace(/[^0-9]/g, '');
-            return parseInt(cleaned);
-          }).filter(price => !isNaN(price) && price > 0);
-          
-          if (prices.length > 0) {
-            // If multiple prices found (price range), use the lowest one
-            return Math.min(...prices);
-          }
-        }
-        
-        // Fallback: try to extract single price
-        const priceNum = parseInt(text.replace(/[^0-9]/g, ''));
-        if (!isNaN(priceNum) && priceNum > 0) {
-          return priceNum;
-        }
-        
-        return null;
-      };
-      
-      // Try to get original price first (giá gốc)
-      let originalPriceElement = document.querySelector(originalPriceSelector);
-      let originalPrice = null;
-      
-      if (originalPriceElement) {
-        const originalPriceText = originalPriceElement.textContent || originalPriceElement.getAttribute('content') || '';
-        console.log('[Copee] Found original price element, text:', originalPriceText);
-        originalPrice = extractPriceFromText(originalPriceText);
-        if (originalPrice) {
-          console.log('[Copee] Extracted original price:', originalPrice);
-        }
-      }
-      
-      // Try to get current/discounted price (giá đã giảm)
-      let currentPriceElement = null;
-      let currentPrice = null;
-      
-      for (const selector of currentPriceSelectors) {
-        currentPriceElement = document.querySelector(selector);
-        if (currentPriceElement) {
-          console.log('[Copee] Found current price element with selector:', selector);
-          const priceText = currentPriceElement.textContent || currentPriceElement.getAttribute('content') || '';
-          console.log('[Copee] Current price text:', priceText);
-          currentPrice = extractPriceFromText(priceText);
-          if (currentPrice) {
-            console.log('[Copee] Extracted current price:', currentPrice);
-            break;
-          }
-        }
-      }
-      
-      // Set prices: originalPrice (giá gốc) and price (giá đã giảm)
-      if (originalPrice) {
-        data.originalPrice = originalPrice;
-        console.log('[Copee] Using original price:', data.originalPrice);
-      }
-      
-      if (currentPrice) {
-        data.price = currentPrice;
-        console.log('[Copee] Using current/sale price:', data.price);
-      }
-      
-      // If we have original price but no current price, use original as current
-      if (originalPrice && !currentPrice) {
-        data.price = originalPrice;
-        console.log('[Copee] No sale price found, using original price as current:', data.price);
-      }
-      
-      // If we have current price but no original, original is null (no discount)
-      if (currentPrice && !originalPrice) {
-        console.log('[Copee] No original price found, product has no discount');
-      }
-
-      // Extract images from Shopee product page
-      // Structure: div.TMw1ot contains thumbnail list with ALL product images
-      // Each image: div.UdI7e2 > picture > img
-      // Skip video elements
-
-      // Helper function to extract unique file ID from Shopee image URL
-      const extractFileId = (url) => {
-        if (!url) return null;
-        const fileMatch = url.match(/\/file\/([a-zA-Z0-9-_]+)/);
-        if (fileMatch) return fileMatch[1];
-        return url.split('?')[0];
-      };
-
-      const seenFileIds = new Set();
-
-      const addUniqueImage = (url) => {
-        if (!url) return false;
-        // Must be Shopee CDN URL
-        if (!url.includes('susercontent.com') && !url.includes('cf.shopee')) return false;
-
-        const fileId = extractFileId(url);
-        if (!fileId || seenFileIds.has(fileId)) return false;
-
-        seenFileIds.add(fileId);
-        const cleanUrl = url.split('?')[0];
-        data.images.push(cleanUrl);
-        console.log('[Copee] Added image:', cleanUrl);
-        return true;
-      };
-
-      console.log('[Copee] Starting image extraction');
-
-      // Strategy 1: Get ALL images from thumbnail list (div.TMw1ot)
-      // This contains all product images as thumbnails
-      const thumbnailListSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.TMw1ot';
-      const thumbnailList = document.querySelector(thumbnailListSelector);
-
-      if (thumbnailList) {
-        console.log('[Copee] Found thumbnail list container');
-
-        // Get all child divs (each represents one image or video)
-        const itemDivs = thumbnailList.querySelectorAll(':scope > div');
-        console.log('[Copee] Found', itemDivs.length, 'items in thumbnail list');
-
-        // Helper function to check if an element contains actual video
-        // STRICT: only detect actual video elements, not class names
-        const checkForVideo = (element) => {
-          // Check for actual video element only
-          if (element.querySelector('video')) {
-            console.log('[Copee] Found actual <video> element');
-            return true;
-          }
-          return false;
-        };
-
-        // Extract images (skip video items)
-        itemDivs.forEach((itemDiv, index) => {
-          // Check if this item contains a video (skip it)
-          if (checkForVideo(itemDiv)) {
-            console.log('[Copee] Skipping video at index', index);
-            return;
-          }
-
-          // Find image in this item: div.UdI7e2 > picture > img
-          const img = itemDiv.querySelector('div.UdI7e2 picture img') ||
-                     itemDiv.querySelector('picture img') ||
-                     itemDiv.querySelector('img');
-
-          if (img) {
-            const src = img.getAttribute('src') ||
-                       img.getAttribute('data-src') ||
-                       img.getAttribute('data-lazy-src');
-            if (src) {
-              addUniqueImage(src);
-            }
-          }
-        });
-      } else {
-        console.log('[Copee] Thumbnail list not found, trying alternative selectors');
-      }
-
-      // Strategy 2: Fallback - try main image container (div.airUhU)
-      if (data.images.length === 0) {
-        const mainContainerSelector = '#sll2-normal-pdp-main > div > div > div > div.container > section > section._OguPS > div.flex.flex-column > div.airUhU';
-        const mainContainer = document.querySelector(mainContainerSelector);
-
-        if (mainContainer) {
-          console.log('[Copee] Found main image container, extracting from child divs');
-
-          const childDivs = mainContainer.querySelectorAll(':scope > div');
-
-          childDivs.forEach((childDiv, index) => {
-            // Skip video - only check for actual video element
-            if (childDiv.querySelector('video')) {
-              console.log('[Copee] Skipping video at index', index);
-              return;
-            }
-
-            const img = childDiv.querySelector('picture img') || childDiv.querySelector('img');
-            if (img) {
-              const src = img.getAttribute('src') || img.getAttribute('data-src');
-              if (src) addUniqueImage(src);
-            }
-          });
-        }
-      }
-
-      // Strategy 3: Last resort - find all Shopee product images on page
-      if (data.images.length === 0) {
-        console.log('[Copee] No images found, scanning entire page for Shopee images');
-
-        const allImgs = document.querySelectorAll('img[src*="susercontent.com"], img[src*="cf.shopee"]');
-        allImgs.forEach(img => {
-          // Skip if inside a video element
-          if (img.closest('video')) return;
-
-          const src = img.getAttribute('src');
-          if (src && src.includes('/file/')) {
-            addUniqueImage(src);
-          }
-        });
-      }
-
-      console.log('[Copee] Total images extracted:', data.images.length);
-      if (data.images.length > 0) {
-        console.log('[Copee] Images:', data.images);
-      }
-
-      // Extract description - Shopee specific selectors
-      let description = '';
-
-      // Strategy 0 (Priority): Try the new exact selector for some products
-      // #sll2-normal-pdp-main > div > div > div > div.container > div.wAMdpk > div > div.page-product__content--left > div.product-detail.page-product__detail > section:nth-child(4) > div > div > div
+    // Strategy 1: product-detail container -> section:nth-child(2)
+    if (!description || description.trim().length < 50) {
       try {
-        const prioritySelector = '#sll2-normal-pdp-main > div > div > div > div.container > div.wAMdpk > div > div.page-product__content--left > div.product-detail.page-product__detail > section:nth-child(4) > div > div > div';
-        const priorityDescDiv = document.querySelector(prioritySelector);
-
-        if (priorityDescDiv) {
-          console.log('[Copee] Found priority description selector (section:nth-child(4))');
-          const divClone = priorityDescDiv.cloneNode(true);
-          divClone.querySelectorAll('h2').forEach(h2 => h2.remove());
-          let descriptionText = extractTextWithLineBreaks(divClone);
-
-          if (descriptionText.length > 50) {
-            description = descriptionText;
-            console.log('[Copee] Description extracted from priority selector, length:', description.length);
-          }
-        }
-      } catch (error) {
-        console.error('[Copee] Error with priority description selector:', error);
-      }
-
-      // Strategy 1: Use the exact selector for Shopee product description (fallback)
-      // #sll2-normal-pdp-main > ... > div.product-detail.page-product__detail > section:nth-child(2) > div
-      if (!description || description.trim().length < 50) {
-        try {
-        // Try the exact full selector first
         const exactSelector = 'div.page-product__content--left > div.product-detail.page-product__detail > section:nth-child(2) > div';
         let descriptionDiv = document.querySelector(exactSelector);
-        
-        console.log('[Copee] Trying exact selector:', exactSelector);
-        console.log('[Copee] Found description div:', !!descriptionDiv);
-        
-        // If exact selector doesn't work, try simplified version
         if (!descriptionDiv) {
           const productDetailContainer = document.querySelector('div.product-detail.page-product__detail');
           if (productDetailContainer) {
-            console.log('[Copee] Found product-detail container, looking for section:nth-child(2)');
             const secondSection = productDetailContainer.querySelector('section:nth-child(2)');
-            if (secondSection) {
-              console.log('[Copee] Found 2nd section, looking for div');
-              descriptionDiv = secondSection.querySelector('div');
-            }
+            if (secondSection) descriptionDiv = secondSection.querySelector('div');
           }
         }
-        
-        // Alternative: find by container and section
         if (!descriptionDiv) {
-          const container = document.querySelector('#sll2-normal-pdp-main');
-          if (container) {
-            const productDetail = container.querySelector('div.product-detail.page-product__detail');
-            if (productDetail) {
-              const sections = productDetail.querySelectorAll('section');
-              console.log('[Copee] Found sections:', sections.length);
-              if (sections.length > 1) {
-                const secondSection = sections[1];
-                descriptionDiv = secondSection.querySelector('div');
-              }
-            }
+          const productDetail = document.querySelector('#sll2-normal-pdp-main div.product-detail.page-product__detail');
+          if (productDetail) {
+            const sections = productDetail.querySelectorAll('section');
+            if (sections.length > 1) descriptionDiv = sections[1].querySelector('div');
           }
         }
-        
         if (descriptionDiv) {
-          console.log('[Copee] Found description div');
-          
-          // Clone to avoid modifying original
           const divClone = descriptionDiv.cloneNode(true);
-
-          // Remove h2 tags if any
           divClone.querySelectorAll('h2').forEach(h2 => h2.remove());
+          const t = extractTextWithLineBreaks(divClone);
+          if (t.length > 50) description = t;
+        }
+      } catch (e) { /* noop */ }
+    }
 
-          // Get text content preserving line breaks
-          let descriptionText = extractTextWithLineBreaks(divClone);
-          
-          if (descriptionText.length > 50) {
-            description = descriptionText;
-            console.log('[Copee] Description extracted, length:', description.length);
-          } else {
-            console.log('[Copee] Description too short, length:', descriptionText.length);
-          }
-        } else {
-          console.log('[Copee] Description div not found with any selector');
-        }
-      } catch (error) {
-          console.error('[Copee] Error extracting description:', error);
-        }
-      }
-
-      // Strategy 2: Fallback - Find the main product description container
-      if (!description || description.trim().length < 100) {
-        const mainDescriptionSelectors = [
-          '[data-testid="product-description"]',
-          '.product-detail__content',
-          '.product-detail__content-wrapper',
-          '[class*="product-detail"] [class*="content"]',
-          '[class*="product-detail"] [class*="description"]',
-          '.shopee-product-detail',
-          '#product-detail',
-        ];
-        
-        for (const selector of mainDescriptionSelectors) {
-          const elements = document.querySelectorAll(selector);
-          for (const element of elements) {
-            const text = extractTextWithLineBreaks(element);
-            // Look for substantial content (at least 100 chars, not just headers)
-            if (text.trim().length > 100 && 
-                !text.match(/^(Mô tả sản phẩm|Thông tin sản phẩm|Chi tiết sản phẩm)\s*:?\s*$/i)) {
-              // Check if it contains actual content (not just navigation/buttons)
-              const hasSubstantialContent = text.split(/\s+/).length > 20; // At least 20 words
-              if (hasSubstantialContent && text.length > description.length) {
-                description = text;
-              }
-            }
-          }
-          if (description.length > 300) break;
-        }
-      }
-      
-      // Strategy 3: Look for description in tab panels (Shopee uses tabs)
-      if (!description || description.trim().length < 200) {
-        const tabSelectors = [
-          '[role="tabpanel"]',
-          '.product-detail__tab-content',
-          '[class*="tab-content"]',
-          '[class*="tabpanel"]',
-          '[class*="product-detail"] [class*="tab"]',
-        ];
-        
-        for (const selector of tabSelectors) {
-          const elements = document.querySelectorAll(selector);
-          for (const element of elements) {
-            // Check if this tab is visible/active
-            const isVisible = element.offsetParent !== null || 
-                             element.style.display !== 'none' ||
-                             !element.classList.contains('hidden');
-            
-            if (isVisible) {
-              const text = extractTextWithLineBreaks(element);
-              if (text.trim().length > description.length && 
-                  text.trim().length > 200 &&
-                  !text.match(/^(Mô tả sản phẩm|Thông tin sản phẩm)\s*:?\s*$/i)) {
-                description = text;
-              }
-            }
-          }
-        }
-      }
-      
-      // Strategy 4: Find description by looking for common Shopee patterns
-      if (!description || description.trim().length < 200) {
-        // Look for divs that contain product description text
-        const allDivs = document.querySelectorAll('div');
-        for (const div of allDivs) {
-          const text = extractTextWithLineBreaks(div);
-          // Check if this div looks like a description container
-          // (has substantial text, not just a header)
-          if (text.trim().length > 300 && 
-              text.split(/\s+/).length > 30 && // At least 30 words
-              !text.match(/^(Mô tả sản phẩm|Thông tin sản phẩm|Chi tiết sản phẩm)\s*:?\s*$/i)) {
-            // Check if parent or this element has product-detail related classes
-            const hasProductDetailClass = div.closest('[class*="product-detail"]') || 
-                                        div.closest('[class*="product-description"]') ||
-                                        div.matches('[class*="product-detail"]') ||
-                                        div.matches('[class*="product-description"]');
-            
-            if (hasProductDetailClass && text.length > description.length) {
-              description = text;
-            }
-          }
-        }
-      }
-      
-      // Strategy 5: Extract from HTML and clean it
-      if (!description || description.trim().length < 200) {
-        const htmlContainers = document.querySelectorAll(
-          '[class*="product-detail"], [id*="product-detail"], [class*="product-description"]'
-        );
-        
-        for (const container of htmlContainers) {
-          const html = container.innerHTML || '';
-          if (html.length > 500) {
-            // Create a temporary element to extract text
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = html;
-            
-            // Remove unwanted elements
-            tempDiv.querySelectorAll('script, style, nav, header, footer, button, .btn, a[href*="category"]').forEach(el => el.remove());
-
-            let text = extractTextWithLineBreaks(tempDiv);
-
-            // Clean up
-            text = text
-              .replace(/Mô tả sản phẩm\s*:?\s*/gi, '')
-              .replace(/Thông tin sản phẩm\s*:?\s*/gi, '')
-              .replace(/Chi tiết sản phẩm\s*:?\s*/gi, '')
-              .trim();
-            
-            if (text.length > description.length && text.length > 200) {
-              description = text;
-            }
-          }
-        }
-      }
-      
-      // Clean up description
-      if (description) {
-        description = description
-          .replace(/^Mô tả sản phẩm\s*:?\s*/i, '')
-          .replace(/^Thông tin sản phẩm\s*:?\s*/i, '')
-          .replace(/^Chi tiết sản phẩm\s*:?\s*/i, '')
-          .replace(/\n{3,}/g, '\n\n') // Normalize line breaks
-          .trim();
-        
-        // Limit length
-        if (description.length > 5000) {
-          description = description.substring(0, 5000) + '...';
-        }
-        
-        data.description = description;
-      }
-
-      // Extract category - Shopee specific selectors
-      // Strategy 1: Find breadcrumb navigation (most reliable for Shopee)
-      const breadcrumbSelectors = [
-        'nav[aria-label*="breadcrumb"] a',
-        '.breadcrumb a',
-        '[data-testid="breadcrumb"] a',
-        '[class*="breadcrumb"] a',
-        'ol[class*="breadcrumb"] a',
-        'ul[class*="breadcrumb"] a',
-        '.shopee-breadcrumb a',
+    // Strategy 2: các container mô tả phổ biến
+    if (!description || description.trim().length < 100) {
+      const selectors = [
+        '[data-testid="product-description"]',
+        '.product-detail__content',
+        '.product-detail__content-wrapper',
+        '[class*="product-detail"] [class*="content"]',
+        '[class*="product-detail"] [class*="description"]',
+        '.shopee-product-detail',
+        '#product-detail',
       ];
-      
-      let breadcrumbLinks = [];
-      for (const selector of breadcrumbSelectors) {
-        breadcrumbLinks = Array.from(document.querySelectorAll(selector));
-        if (breadcrumbLinks.length > 0) {
-          console.log('[Copee] Found breadcrumb with selector:', selector, breadcrumbLinks.length, 'items');
-          break;
-        }
-      }
-      
-      if (breadcrumbLinks.length > 0) {
-        // Filter out generic items
-        const genericTerms = ['trang chủ', 'home', 'sản phẩm', 'products', 'shopee', 'shop'];
-        const validLinks = breadcrumbLinks.filter(link => {
-          const text = link.textContent.trim().toLowerCase();
-          return !genericTerms.includes(text) && text.length > 0;
-        });
-        
-        if (validLinks.length > 0) {
-          // Get the last valid breadcrumb item (most specific category)
-          const lastLink = validLinks[validLinks.length - 1];
-          const categoryText = lastLink.textContent.trim();
-          
-          if (categoryText && categoryText.length > 0) {
-            data.category = categoryText;
-            console.log('[Copee] Category from breadcrumb:', data.category);
+      for (const selector of selectors) {
+        for (const element of document.querySelectorAll(selector)) {
+          const text = extractTextWithLineBreaks(element);
+          if (text.trim().length > 100 &&
+              !text.match(/^(Mô tả sản phẩm|Thông tin sản phẩm|Chi tiết sản phẩm)\s*:?\s*$/i)) {
+            if (text.split(/\s+/).length > 20 && text.length > description.length) description = text;
           }
         }
+        if (description.length > 300) break;
       }
-      
-      // Strategy 2: Find category links (links containing /category/)
-      if (!data.category) {
-        const categoryLinks = Array.from(document.querySelectorAll('a[href*="/category/"]'));
-        if (categoryLinks.length > 0) {
-          // Filter and get the most specific one
-          const validCategoryLinks = categoryLinks.filter(link => {
-            const text = link.textContent.trim();
-            const href = link.getAttribute('href') || '';
-            // Must have text and be a category link
-            return text.length > 0 && 
-                   href.includes('/category/') && 
-                   !text.match(/^(Danh mục|Category|Phân loại|Trang chủ|Home)$/i);
-          });
-          
-          if (validCategoryLinks.length > 0) {
-            // Get the last one (usually most specific)
-            const lastLink = validCategoryLinks[validCategoryLinks.length - 1];
-            const categoryText = lastLink.textContent.trim();
-            if (categoryText) {
-              data.category = categoryText;
-              console.log('[Copee] Category from category links:', data.category);
-            }
-          }
+    }
+
+    // Clean up + limit
+    if (description) {
+      description = description
+        .replace(/^Mô tả sản phẩm\s*:?\s*/i, '')
+        .replace(/^Thông tin sản phẩm\s*:?\s*/i, '')
+        .replace(/^Chi tiết sản phẩm\s*:?\s*/i, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      if (description.length > 5000) description = description.substring(0, 5000) + '...';
+    }
+    return description;
+  }
+
+  // ============================================================
+  // DANH MỤC (giữ nguyên logic cũ)
+  // ============================================================
+
+  function extractCategory() {
+    let category = '';
+    const breadcrumbSelectors = [
+      'nav[aria-label*="breadcrumb"] a', '.breadcrumb a', '[data-testid="breadcrumb"] a',
+      '[class*="breadcrumb"] a', 'ol[class*="breadcrumb"] a', 'ul[class*="breadcrumb"] a',
+      '.shopee-breadcrumb a',
+    ];
+    let links = [];
+    for (const selector of breadcrumbSelectors) {
+      links = Array.from(document.querySelectorAll(selector));
+      if (links.length > 0) break;
+    }
+    if (links.length > 0) {
+      const generic = ['trang chủ', 'home', 'sản phẩm', 'products', 'shopee', 'shop'];
+      const valid = links.filter(l => {
+        const t = l.textContent.trim().toLowerCase();
+        return !generic.includes(t) && t.length > 0;
+      });
+      if (valid.length > 0) category = valid[valid.length - 1].textContent.trim();
+    }
+
+    if (!category) {
+      const catLinks = Array.from(document.querySelectorAll('a[href*="/category/"]')).filter(l => {
+        const t = l.textContent.trim();
+        return t.length > 0 && !t.match(/^(Danh mục|Category|Phân loại|Trang chủ|Home)$/i);
+      });
+      if (catLinks.length > 0) category = catLinks[catLinks.length - 1].textContent.trim();
+    }
+
+    if (!category) {
+      const urlMatch = window.location.href.match(/\/category\/([^\/\?]+)/);
+      if (urlMatch) {
+        category = decodeURIComponent(urlMatch[1]).replace(/-/g, ' ')
+          .split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      }
+    }
+    return category ? category.trim().replace(/\s+/g, ' ') : '';
+  }
+
+  // ============================================================
+  // LIVE DOM: tên + giá của SẢN PHẨM ĐANG HIỂN THỊ (luôn đúng khi SPA)
+  // ============================================================
+
+  // Quét giá đang hiển thị: current (giá bán) + original (giá gạch ngang).
+  function scanLivePrices() {
+    const boundary = document.querySelector(
+      'div.product-detail.page-product__detail, [class*="product-rating"], [class*="product-comment"]'
+    );
+    const beforeB = (el) => !boundary || (boundary.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING);
+    const re = /(\d[\d.]{2,})\s*(?:₫|đ)/;
+    let current = null, original = null;
+
+    for (const el of document.querySelectorAll('div, span')) {
+      if (el.children.length > 0) continue;         // chỉ node lá chứa text giá
+      if (el.closest('header, nav')) continue;      // bỏ giá quảng cáo ở header
+      if (!beforeB(el)) continue;                   // chỉ vùng trên mô tả/đánh giá
+      const txt = (el.textContent || '').trim();
+      if (!txt || txt.length > 20) continue;
+      const m = txt.match(re);
+      if (!m) continue;
+      const n = parseInt(m[1].replace(/\D/g, ''), 10);
+      if (!(n >= 1000)) continue;
+      let struck = false;
+      try { struck = window.getComputedStyle(el).textDecorationLine.includes('line-through'); } catch (e) { /* noop */ }
+      if (struck) { if (!original || n > original) original = n; }
+      else if (!current) { current = n; }
+      if (current && original) break;
+    }
+    return { current, original };
+  }
+
+  function applyLiveDom(data) {
+    if (!data.title) {
+      let h1 = (document.querySelector('h1')?.textContent || '').trim().replace(/^\s*Yêu thích\s*/i, '').trim();
+      if (h1) data.title = h1;
+    }
+    if (!data.price) {
+      const p = scanLivePrices();
+      if (p.current) data.price = p.current;
+      if (p.original && (!p.current || p.original > p.current)) data.originalPrice = p.original;
+    }
+    console.log('[Copee] Live DOM ->', {
+      title: data.title, price: data.price, originalPrice: data.originalPrice,
+    });
+  }
+
+  // ============================================================
+  // Orchestrator: gộp dữ liệu từ nhiều nguồn
+  // ============================================================
+
+  async function extractProductData() {
+    const sourceUrl = window.location.origin + window.location.pathname;
+    const data = {
+      title: '', price: 0, originalPrice: undefined,
+      images: [], description: '', category: '', sourceUrl,
+    };
+    const addImage = makeImageAdder(data);
+
+    try {
+      const ids = getShopeeIds();
+
+      // Nguồn 1: API nội bộ Shopee
+      if (ids) {
+        try {
+          const item = await fetchShopeeApiItem(ids);
+          applyApiItem(item, data, addImage);
+        } catch (e) {
+          console.warn('[Copee] Nguồn API thất bại:', e.message);
         }
-      }
-      
-      // Strategy 3: Look for category in product info section
-      if (!data.category) {
-        const categorySelectors = [
-          '[data-testid="product-category"]',
-          '[class*="product-category"]',
-          '[class*="product-info"] [class*="category"]',
-          '[class*="category"]',
-        ];
-        
-        for (const selector of categorySelectors) {
-          const elements = document.querySelectorAll(selector);
-          for (const element of elements) {
-            const text = element.textContent.trim();
-            // Skip labels and generic terms
-            if (text && 
-                text.length > 0 && 
-                !text.match(/^(Danh mục|Category|Phân loại|Trang chủ|Home|Sản phẩm)$/i) &&
-                text.length < 100) { // Category names are usually short
-              data.category = text;
-              console.log('[Copee] Category from product info:', data.category);
-              break;
-            }
-          }
-          if (data.category) break;
-        }
-      }
-      
-      // Strategy 4: Extract from URL
-      if (!data.category) {
-        const url = window.location.href;
-        // Try to find category in URL
-        const urlMatch = url.match(/\/category\/([^\/\?]+)/);
-        if (urlMatch) {
-          let categoryFromUrl = decodeURIComponent(urlMatch[1]);
-          categoryFromUrl = categoryFromUrl
-            .replace(/-/g, ' ')
-            .split(' ')
-            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-            .join(' ');
-          data.category = categoryFromUrl;
-          console.log('[Copee] Category from URL:', data.category);
-        }
-      }
-      
-      // Clean up category
-      if (data.category) {
-        data.category = data.category.trim();
-        // Remove any extra whitespace
-        data.category = data.category.replace(/\s+/g, ' ');
       }
 
-      console.log('[Copee] Extracted product data:', {
+      // Nguồn 2: LIVE DOM (dữ liệu của SẢN PHẨM ĐANG XEM — luôn cập nhật kể cả
+      // khi Shopee điều hướng SPA). Ưu tiên hơn JSON-LD/meta vì 2 nguồn đó KHÔNG
+      // đổi theo điều hướng SPA (giữ nguyên sản phẩm đầu tiên -> gây dính đồ cũ).
+      try { applyLiveDom(data); } catch (e) { console.warn('[Copee] Live DOM lỗi:', e.message); }
+
+      // Ảnh gallery từ <picture> hiện tại (chỉ khi API chưa cho đủ ảnh).
+      if (data.images.length < 2) {
+        try { collectGalleryImages(addImage); } catch (e) { console.warn('[Copee] Gallery lỗi:', e.message); }
+      }
+
+      // Nguồn 3: JSON-LD (CHỐT CUỐI — có thể cũ khi SPA, chỉ bù khi vẫn trống)
+      if (!data.title || !data.price || data.images.length === 0) {
+        try { applyJsonLd(data, addImage); } catch (e) { console.warn('[Copee] JSON-LD lỗi:', e.message); }
+      }
+
+      // Nguồn 4: OG meta (CHỐT CUỐI — cũng có thể cũ khi SPA)
+      if (!data.title || !data.price || data.images.length === 0) {
+        try { applyMetaAndDom(data, addImage); } catch (e) { console.warn('[Copee] Meta/DOM lỗi:', e.message); }
+      }
+
+      // Mô tả + danh mục
+      data.description = extractDescription();
+      data.category = extractCategory();
+
+      console.log('[Copee] Kết quả cuối:', {
         title: data.title || '(no title)',
         price: data.price || 0,
+        originalPrice: data.originalPrice || '(none)',
         category: data.category || '(no category)',
         descriptionLength: data.description?.length || 0,
         imagesCount: data.images?.length || 0,
         sourceUrl: data.sourceUrl,
       });
     } catch (error) {
-      console.error('Error extracting product data:', error);
+      console.error('[Copee] Lỗi extractProductData:', error);
     }
 
     return data;
   }
 
-  // Helper function to safely send message to extension
+  // ============================================================
+  // Gửi dữ liệu về background / popup
+  // ============================================================
+
   function safeSendMessage(message, callback) {
     try {
-      // Check if chrome.runtime is available
       if (!chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
-        console.error('[Copee] Chrome runtime not available');
         if (callback) callback({ error: 'Chrome runtime not available' });
         return;
       }
-      
       chrome.runtime.sendMessage(message, (response) => {
         if (chrome.runtime.lastError) {
           const error = chrome.runtime.lastError.message;
-          // Check if it's the "Extension context invalidated" error
           if (error && error.includes('Extension context invalidated')) {
-            console.warn('[Copee] Extension context invalidated. Please reload the page.');
-            // Stop trying to send messages
-            if (window.copeeExtractTimeout) {
-              clearTimeout(window.copeeExtractTimeout);
-            }
-          } else {
-            console.error('[Copee] Error sending message:', error);
+            if (window.copeeExtractTimeout) clearTimeout(window.copeeExtractTimeout);
           }
-          if (callback) callback({ error: error });
-        } else {
-          if (callback) callback(response);
+          if (callback) callback({ error });
+        } else if (callback) {
+          callback(response);
         }
       });
     } catch (error) {
-      console.error('[Copee] Exception sending message:', error);
       if (callback) callback({ error: error.message });
     }
   }
 
-  // Send product data to popup
-  function sendProductData() {
-    const productData = extractProductData();
-    safeSendMessage({
-      action: 'productData',
-      data: productData
-    });
-  }
-
-  // Wait for page to load and content to appear
   let extractionAttempts = 0;
-  const maxAttempts = 10; // Try up to 10 times over 5 seconds
-  
-  function tryExtractWithRetry() {
+  const maxAttempts = 10;
+
+  async function tryExtractWithRetry() {
     extractionAttempts++;
-    const productData = extractProductData();
-    
-    console.log(`[Copee] Extraction attempt ${extractionAttempts}/${maxAttempts}:`, {
+    const productData = await extractProductData();
+
+    console.log(`[Copee] Lần quét ${extractionAttempts}/${maxAttempts}:`, {
       hasTitle: !!productData.title,
       hasPrice: productData.price > 0,
-      hasDescription: !!(productData.description && productData.description.length > 0),
-      descriptionLength: productData.description?.length || 0,
-      hasCategory: !!productData.category,
       hasImages: productData.images?.length > 0,
     });
-    
-    // Check if we have at least title (minimum requirement)
+
     const hasTitle = productData.title && productData.title.trim().length > 0;
-    
-    // If we have title, we can send data (even without price or description)
-    // But if we don't have title yet, keep trying
-    if (hasTitle) {
-      // Send data immediately if we have title
-      console.log('[Copee] Sending product data to background:', productData);
-      safeSendMessage({
-        action: 'productData',
-        data: productData
-      }, (response) => {
-        if (response && response.error) {
-          // If extension context invalidated, stop retrying
-          if (response.error.includes('Extension context invalidated')) {
-            console.warn('[Copee] Extension reloaded. Please reload this page.');
-            return;
-          }
-        } else {
-          console.log('[Copee] Message sent successfully');
-        }
-      });
+    const hasPrice = productData.price > 0;
+
+    // Gửi khi có tối thiểu title; nếu còn thiếu giá thì vẫn thử lại thêm cho đủ
+    if (hasTitle && (hasPrice || extractionAttempts >= maxAttempts)) {
+      safeSendMessage({ action: 'productData', data: productData });
     } else if (extractionAttempts < maxAttempts) {
-      // No title yet, keep trying
-      console.log('[Copee] No title found, retrying...');
       setTimeout(tryExtractWithRetry, 500);
     } else {
-      // Max attempts reached, send whatever we have
-      console.log('[Copee] Max attempts reached, sending data anyway:', productData);
-      safeSendMessage({
-        action: 'productData',
-        data: productData
-      }, (response) => {
-        if (response && response.error) {
-          if (response.error.includes('Extension context invalidated')) {
-            console.warn('[Copee] Extension reloaded. Please reload this page.');
-            return;
-          }
-        }
-      });
+      safeSendMessage({ action: 'productData', data: productData });
     }
   }
 
-  // Initial extraction
+  // Khởi động
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-      // Wait a bit for dynamic content to start loading
-      setTimeout(tryExtractWithRetry, 500);
-    });
+    document.addEventListener('DOMContentLoaded', () => setTimeout(tryExtractWithRetry, 500));
   } else {
-    // Page already loaded, but content might still be loading
     setTimeout(tryExtractWithRetry, 500);
   }
 
-  // Re-extract when DOM changes (for dynamic content)
+  // Re-extract khi DOM thay đổi nhiều (nội dung động)
   const observer = new MutationObserver((mutations) => {
-    // Only re-extract if significant changes occurred
     let shouldReExtract = false;
     for (const mutation of mutations) {
-      if (mutation.addedNodes.length > 0) {
-        // Check if product detail content was added
-        for (const node of mutation.addedNodes) {
-          if (node.nodeType === 1) { // Element node
-            const element = node;
-            if (element.querySelector && (
-              element.querySelector('.product-detail') ||
-              element.querySelector('[class*="product-detail"]') ||
-              element.classList.contains('product-detail')
-            )) {
-              shouldReExtract = true;
-              break;
-            }
-          }
-        }
-        if (shouldReExtract) break;
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === 1 && node.querySelector && (
+          node.querySelector('.product-detail') ||
+          node.querySelector('[class*="product-detail"]') ||
+          node.classList.contains('product-detail')
+        )) { shouldReExtract = true; break; }
       }
+      if (shouldReExtract) break;
     }
-    
     if (shouldReExtract && extractionAttempts < maxAttempts) {
-      // Debounce: wait a bit before re-extracting
       clearTimeout(window.copeeExtractTimeout);
-      window.copeeExtractTimeout = setTimeout(() => {
-        tryExtractWithRetry();
-      }, 1000);
+      window.copeeExtractTimeout = setTimeout(tryExtractWithRetry, 1000);
     }
   });
+  observer.observe(document.body, { childList: true, subtree: true });
 
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
+  // SPA: Shopee đổi URL KHÔNG reload trang -> content script không chạy lại.
+  // Theo dõi URL đổi để tự quét lại sản phẩm mới (reset để không dính dữ liệu cũ).
+  let __copeeLastHref = location.href;
+  function onUrlMaybeChanged() {
+    if (location.href === __copeeLastHref) return;
+    __copeeLastHref = location.href;
+    console.log('[Copee] URL đổi -> quét lại sản phẩm mới');
+    extractionAttempts = 0;
+    clearTimeout(window.copeeExtractTimeout);
+    // Chờ DOM sản phẩm mới render xong mới quét (tránh dính ảnh/giá sản phẩm cũ)
+    window.copeeExtractTimeout = setTimeout(tryExtractWithRetry, 1200);
+  }
+  ['pushState', 'replaceState'].forEach(fn => {
+    const orig = history[fn];
+    history[fn] = function () { const r = orig.apply(this, arguments); onUrlMaybeChanged(); return r; };
   });
+  window.addEventListener('popstate', onUrlMaybeChanged);
+  setInterval(onUrlMaybeChanged, 600); // fallback nếu bỏ sót
 
-  // Listen for messages from popup to re-extract
+  // Popup yêu cầu quét lại
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'extractProduct') {
-      console.log('[Copee] Received extractProduct request from popup');
-      // Reset extraction attempts and re-extract
       extractionAttempts = 0;
       tryExtractWithRetry();
       sendResponse({ success: true });
@@ -789,5 +648,5 @@
     return true;
   });
 
-  console.log('Copee: Product data extractor loaded');
+  console.log('Copee: Product data extractor loaded (v2 - resilient price/image)');
 })();

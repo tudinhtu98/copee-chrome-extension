@@ -76,8 +76,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const data = result[`product_tab_${tabId}`];
         console.log('[Copee BG] Found data:', data ? 'yes' : 'no');
 
-        if (data) {
-          // Data exists, return it
+        // So khớp sản phẩm: lấy khóa {shopId.itemId} từ URL. Nếu data đã lưu là
+        // của SẢN PHẨM KHÁC (do Shopee điều hướng SPA, chưa quét lại) -> coi như
+        // chưa có, kích hoạt quét lại thay vì trả dữ liệu cũ.
+        const itemKey = (u) => {
+          const m = (u || '').match(/-i\.(\d+)\.(\d+)/);
+          return m ? `${m[1]}.${m[2]}` : null;
+        };
+        const currentKey = itemKey(tabUrl);
+        const storedKey = itemKey(data?.sourceUrl);
+        const isStale = data && currentKey && storedKey && currentKey !== storedKey;
+        if (isStale) {
+          console.log('[Copee BG] Data cũ (', storedKey, ') != trang hiện tại (', currentKey, ') -> quét lại');
+        }
+
+        if (data && !isStale) {
+          // Data exists and matches current product
           sendResponse({ data: data });
         } else if (isShopeeProductPage) {
           // No data but it's a Shopee page - trigger extraction
