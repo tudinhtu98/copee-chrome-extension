@@ -10,31 +10,36 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function loadSettings() {
-  chrome.storage.local.get(['apiEndpoint', 'authToken'], (result) => {
+  chrome.storage.local.get(['apiEndpoint', 'authToken', 'floatButtonEnabled'], (result) => {
     if (result.apiEndpoint) {
       document.getElementById('api-endpoint').value = result.apiEndpoint;
     } else {
       document.getElementById('api-endpoint').value = 'https://app.copee.vn';
     }
-    
+
     if (result.authToken) {
       document.getElementById('auth-token').value = result.authToken;
     }
+
+    // Mặc định bật nếu chưa cấu hình
+    document.getElementById('float-button').checked = result.floatButtonEnabled !== false;
   });
 }
 
 function saveSettings() {
   const apiEndpoint = document.getElementById('api-endpoint').value.trim();
   const authToken = document.getElementById('auth-token').value.trim();
-  
+  const floatButtonEnabled = document.getElementById('float-button').checked;
+
   if (!apiEndpoint) {
     showStatus('Please enter API endpoint', 'error');
     return;
   }
-  
+
   chrome.storage.local.set({
     apiEndpoint: apiEndpoint,
     authToken: authToken || '',
+    floatButtonEnabled: floatButtonEnabled,
   }, () => {
     showStatus('Settings saved successfully!', 'success');
   });

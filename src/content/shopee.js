@@ -11,6 +11,9 @@
 (function() {
   'use strict';
 
+  // Dữ liệu sản phẩm mới nhất đã quét (dùng cho nút float copy nhanh)
+  let __copeeLatestData = null;
+
   // ============================================================
   // Helpers chung
   // ============================================================
@@ -541,6 +544,382 @@
   }
 
   // ============================================================
+  // NÚT FLOAT: copy nhanh ngay trên trang Shopee (Shadow DOM để cô lập CSS)
+  // ============================================================
+
+  const FAB_HOST_ID = 'copee-fab-host';
+  let __fabRoot = null;      // shadow root
+  let __fabEls = null;       // { wrap, fab, panel, title, price, copyBtn, status, minimizeBtn }
+  let __fabBusy = false;     // đang copy -> chặn double click
+  let __fabEnabled = true;   // bật/tắt từ settings (storage.floatButtonEnabled)
+  let __fabMinimized = false;
+  let __fabDragged = false;  // vừa kéo -> chặn click ngay sau đó
+  let __fabPos = null;       // vị trí tuỳ chỉnh {right, bottom} (null = neo mặc định)
+
+  // Trang này có phải trang sản phẩm Shopee không (có -i.shopId.itemId)
+  function isProductPage() {
+    return !!getShopeeIds();
+  }
+
+  function buildFab() {
+    if (document.getElementById(FAB_HOST_ID)) return;
+
+    const host = document.createElement('div');
+    host.id = FAB_HOST_ID;
+    // Bám vào documentElement để tồn tại kể cả khi Shopee thay body
+    (document.documentElement || document.body).appendChild(host);
+
+    const root = host.attachShadow({ mode: 'open' });
+    __fabRoot = root;
+
+    const style = document.createElement('style');
+    style.textContent = `
+      :host { all: initial; }
+      * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+      .wrap {
+        position: fixed; right: 20px; bottom: 96px; z-index: 2147483647;
+        display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+      }
+      /* Nút tròn (trạng thái thu gọn) */
+      .fab {
+        width: 56px; height: 56px; border-radius: 50%; border: none; cursor: pointer;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: #fff; display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 6px 20px rgba(102,126,234,.45); transition: transform .15s, box-shadow .15s;
+      }
+      .fab:hover { transform: translateY(-2px); box-shadow: 0 8px 26px rgba(102,126,234,.6); }
+      .fab svg { width: 26px; height: 26px; }
+      .fab.hidden { display: none; }
+      /* Bảng (trạng thái mở rộng) */
+      .panel {
+        width: 300px; background: #fff; border-radius: 14px; overflow: hidden;
+        box-shadow: 0 10px 40px rgba(0,0,0,.22); border: 1px solid #eee;
+      }
+      .panel.hidden { display: none; }
+      .panel-head {
+        display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff;
+        cursor: grab; user-select: none;
+      }
+      .panel-head:active { cursor: grabbing; }
+      .panel-head .logo {
+        width: 26px; height: 26px; border-radius: 7px; background: rgba(255,255,255,.2);
+        display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      }
+      .panel-head .logo svg { width: 16px; height: 16px; }
+      .panel-head .name { font-size: 15px; font-weight: 700; flex: 1; }
+      .icon-btn {
+        width: 26px; height: 26px; border: none; border-radius: 6px; cursor: pointer;
+        background: rgba(255,255,255,.18); color: #fff; font-size: 16px; line-height: 1;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .icon-btn:hover { background: rgba(255,255,255,.32); }
+      .panel-body { padding: 14px; }
+      .p-title {
+        font-size: 13px; font-weight: 500; color: #333; margin-bottom: 6px;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      }
+      .p-price { font-size: 15px; font-weight: 700; color: #f1582c; margin-bottom: 10px; }
+      .p-price .orig { color: #999; text-decoration: line-through; font-size: 12px; font-weight: 400; margin-left: 6px; }
+      .p-imgs-label { font-size: 11px; color: #888; margin-bottom: 5px; }
+      .p-imgs { display: flex; gap: 5px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 12px; }
+      .p-imgs::-webkit-scrollbar { height: 5px; }
+      .p-imgs::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+      .p-imgs img { width: 38px; height: 38px; min-width: 38px; object-fit: cover; border-radius: 5px; border: 1px solid #e5e5e5; }
+      .p-imgs.hidden { display: none; }
+      .p-imgs-label.hidden { display: none; }
+      .copy-btn {
+        width: 100%; padding: 11px; border: none; border-radius: 9px; cursor: pointer;
+        font-size: 14px; font-weight: 600; color: #fff;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); transition: opacity .15s;
+      }
+      .copy-btn:hover { opacity: .92; }
+      .copy-btn:disabled { opacity: .55; cursor: not-allowed; }
+      .status { margin-top: 10px; padding: 8px 10px; border-radius: 7px; font-size: 12.5px; text-align: center; display: none; }
+      .status.show { display: block; }
+      .status.loading { background: #d1ecf1; color: #0c5460; }
+      .status.success { background: #d4edda; color: #155724; }
+      .status.error { background: #f8d7da; color: #721c24; }
+    `;
+    root.appendChild(style);
+
+    const cartSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>`;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'wrap';
+    wrap.innerHTML = `
+      <div class="panel">
+        <div class="panel-head">
+          <div class="logo">${cartSvg}</div>
+          <div class="name">Copee</div>
+          <button class="icon-btn min" title="Thu gọn">–</button>
+        </div>
+        <div class="panel-body">
+          <div class="p-title">Đang quét sản phẩm…</div>
+          <div class="p-price"></div>
+          <div class="p-imgs-label hidden"></div>
+          <div class="p-imgs hidden"></div>
+          <button class="copy-btn">Copy to Copee</button>
+          <div class="status"></div>
+        </div>
+      </div>
+      <button class="fab hidden" title="Copy to Copee">${cartSvg}</button>
+    `;
+    root.appendChild(wrap);
+
+    __fabEls = {
+      wrap,
+      panel: wrap.querySelector('.panel'),
+      fab: wrap.querySelector('.fab'),
+      title: wrap.querySelector('.p-title'),
+      price: wrap.querySelector('.p-price'),
+      imgsLabel: wrap.querySelector('.p-imgs-label'),
+      imgs: wrap.querySelector('.p-imgs'),
+      copyBtn: wrap.querySelector('.copy-btn'),
+      status: wrap.querySelector('.status'),
+      minimizeBtn: wrap.querySelector('.min'),
+    };
+
+    __fabEls.copyBtn.addEventListener('click', doCopyFromFab);
+    __fabEls.minimizeBtn.addEventListener('click', () => { if (!__fabDragged) setFabMinimized(true); });
+    __fabEls.fab.addEventListener('click', () => { if (!__fabDragged) setFabMinimized(false); });
+
+    // Kéo-thả để đổi vị trí: cầm ở thanh tiêu đề (bảng) hoặc chính nút tròn
+    enableDrag(wrap.querySelector('.panel-head'));
+    enableDrag(__fabEls.fab);
+
+    if (__fabPos) applyFabPosition(__fabPos);
+    setFabMinimized(__fabMinimized);
+    updateFabInfo();
+  }
+
+  // Áp vị trí tuỳ chỉnh, NEO theo GÓC GẦN NHẤT (trái/phải + trên/dưới).
+  // Mỗi lúc chỉ 1 phần tử hiển thị (bảng HOẶC nút), nên ghim đúng góc thì
+  // thu gọn/mở rộng đều dính vào góc đó — hoạt động ở cả 4 góc màn hình.
+  // pos = { anchorX: 'left'|'right', x, anchorY: 'top'|'bottom', y }
+  function applyFabPosition(pos) {
+    if (!__fabEls || !pos) return;
+    const w = __fabEls.wrap;
+    const ax = pos.anchorX === 'left' ? 'left' : 'right';
+    const ay = pos.anchorY === 'top' ? 'top' : 'bottom';
+    w.style.left = 'auto'; w.style.right = 'auto';
+    w.style.top = 'auto'; w.style.bottom = 'auto';
+    w.style[ax] = Math.max(0, pos.x) + 'px';
+    w.style[ay] = Math.max(0, pos.y) + 'px';
+    // Giữ trong màn hình (phòng khi cửa sổ nhỏ lại)
+    const rect = w.getBoundingClientRect();
+    w.style[ax] = Math.max(0, Math.min(window.innerWidth - rect.width, pos.x)) + 'px';
+    w.style[ay] = Math.max(0, Math.min(window.innerHeight - rect.height, pos.y)) + 'px';
+  }
+
+  // Bật kéo-thả cho một phần tử "tay cầm"; di chuyển cả .wrap
+  function enableDrag(handle) {
+    if (!handle) return;
+    let startX = 0, startY = 0, baseLeft = 0, baseTop = 0, dragging = false;
+
+    const onDown = (e) => {
+      // Bỏ qua khi bấm vào nút bên trong thanh tiêu đề (thu gọn…)
+      if (e.target.closest('.icon-btn') && handle.classList.contains('panel-head')) return;
+      const w = __fabEls.wrap;
+      const rect = w.getBoundingClientRect();
+      baseLeft = rect.left; baseTop = rect.top;
+      startX = e.clientX; startY = e.clientY;
+      dragging = true; __fabDragged = false;
+      // Trong lúc kéo dùng left/top tuyệt đối cho mượt; khi thả mới snap về góc
+      w.style.right = 'auto'; w.style.bottom = 'auto';
+      w.style.left = baseLeft + 'px'; w.style.top = baseTop + 'px';
+      handle.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    };
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!__fabDragged && Math.abs(dx) + Math.abs(dy) > 5) __fabDragged = true;
+      const w = __fabEls.wrap;
+      const rect = w.getBoundingClientRect();
+      const left = Math.max(0, Math.min(window.innerWidth - rect.width, baseLeft + dx));
+      const top = Math.max(0, Math.min(window.innerHeight - rect.height, baseTop + dy));
+      w.style.left = left + 'px';
+      w.style.top = top + 'px';
+    };
+
+    const onUp = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      handle.releasePointerCapture?.(e.pointerId);
+      if (__fabDragged) {
+        const rect = __fabEls.wrap.getBoundingClientRect();
+        // Chọn góc gần nhất theo tâm phần tử -> ghim vào góc đó
+        const anchorX = (rect.left + rect.width / 2 < window.innerWidth / 2) ? 'left' : 'right';
+        const anchorY = (rect.top + rect.height / 2 < window.innerHeight / 2) ? 'top' : 'bottom';
+        __fabPos = {
+          anchorX,
+          x: anchorX === 'left' ? Math.round(rect.left) : Math.round(window.innerWidth - rect.right),
+          anchorY,
+          y: anchorY === 'top' ? Math.round(rect.top) : Math.round(window.innerHeight - rect.bottom),
+        };
+        applyFabPosition(__fabPos); // chuyển sang neo theo góc (không giật vị trí)
+        try { chrome.storage?.local.set({ floatButtonPos: __fabPos }); } catch (err) { /* noop */ }
+      }
+      // Cho phép click sau khi nhả một nhịp (tránh kích hoạt click do kéo)
+      setTimeout(() => { __fabDragged = false; }, 0);
+    };
+
+    handle.style.touchAction = 'none';
+    handle.addEventListener('pointerdown', onDown);
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onUp);
+  }
+
+  function setFabMinimized(min) {
+    __fabMinimized = min;
+    if (!__fabEls) return;
+    __fabEls.panel.classList.toggle('hidden', min);
+    __fabEls.fab.classList.toggle('hidden', !min);
+    // Kích thước vừa đổi (nút 56px <-> bảng 300px): clamp lại theo phần tử đang
+    // hiển thị để bảng không tràn ra ngoài màn hình khi mở lại ở sát viền/góc.
+    if (__fabPos) applyFabPosition(__fabPos);
+    try { chrome.storage?.local.set({ floatButtonMinimized: min }); } catch (e) { /* noop */ }
+  }
+
+  // Ẩn/hiện toàn bộ nút theo: bật/tắt trong settings + có phải trang sản phẩm
+  function refreshFabVisibility() {
+    const host = document.getElementById(FAB_HOST_ID);
+    const show = __fabEnabled && isProductPage();
+    if (show) {
+      if (!host) buildFab();
+      else if (__fabEls) __fabEls.wrap.style.display = 'flex';
+    } else if (host && __fabEls) {
+      __fabEls.wrap.style.display = 'none';
+    }
+  }
+
+  function formatPriceVnd(n) {
+    if (!n) return '';
+    try {
+      return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(n);
+    } catch (e) {
+      return n + '₫';
+    }
+  }
+
+  function updateFabInfo() {
+    if (!__fabEls) return;
+    const d = __copeeLatestData;
+    if (!d || !d.title) {
+      __fabEls.title.textContent = 'Đang quét sản phẩm…';
+      __fabEls.price.textContent = '';
+      __fabEls.imgs.classList.add('hidden');
+      __fabEls.imgsLabel.classList.add('hidden');
+      __fabEls.copyBtn.disabled = true;
+      return;
+    }
+    __fabEls.title.textContent = d.title;
+
+    // Dải ảnh sẽ được copy sang Copee (nhỏ, cuộn ngang)
+    const imgs = Array.isArray(d.images) ? d.images.filter(Boolean) : [];
+    if (imgs.length) {
+      __fabEls.imgsLabel.textContent = `Hình sẽ copy (${imgs.length})`;
+      __fabEls.imgs.innerHTML = imgs
+        .map(src => `<img src="${src}" alt="" loading="lazy" onerror="this.style.display='none'">`)
+        .join('');
+      __fabEls.imgs.classList.remove('hidden');
+      __fabEls.imgsLabel.classList.remove('hidden');
+    } else {
+      __fabEls.imgs.classList.add('hidden');
+      __fabEls.imgsLabel.classList.add('hidden');
+    }
+
+    let priceHtml = '';
+    if (d.price) {
+      priceHtml = formatPriceVnd(d.price);
+      if (d.originalPrice && d.originalPrice > d.price) {
+        priceHtml += `<span class="orig">${formatPriceVnd(d.originalPrice)}</span>`;
+      }
+    } else if (d.originalPrice) {
+      priceHtml = formatPriceVnd(d.originalPrice);
+    }
+    __fabEls.price.innerHTML = priceHtml;
+    if (!__fabBusy) __fabEls.copyBtn.disabled = false;
+  }
+
+  function setFabStatus(msg, type) {
+    if (!__fabEls) return;
+    const s = __fabEls.status;
+    if (!msg) { s.className = 'status'; s.textContent = ''; return; }
+    s.className = `status show ${type || ''}`;
+    s.textContent = msg;
+  }
+
+  function doCopyFromFab() {
+    if (__fabBusy) return;
+    const data = __copeeLatestData;
+    if (!data || !data.title) {
+      setFabStatus('Chưa có dữ liệu sản phẩm, đang quét lại…', 'error');
+      extractionAttempts = 0;
+      tryExtractWithRetry();
+      return;
+    }
+
+    __fabBusy = true;
+    __fabEls.copyBtn.disabled = true;
+    const origText = 'Copy to Copee';
+    __fabEls.copyBtn.textContent = 'Đang copy…';
+    setFabStatus('Đang copy sản phẩm sang Copee…', 'loading');
+
+    safeSendMessage({ action: 'copyProduct', data }, (response) => {
+      __fabBusy = false;
+      if (!__fabEls) return;
+      if (response && response.success) {
+        __fabEls.copyBtn.textContent = '✓ Đã copy!';
+        setFabStatus('✓ Copy thành công!', 'success');
+        setTimeout(() => {
+          if (!__fabEls) return;
+          __fabEls.copyBtn.textContent = origText;
+          __fabEls.copyBtn.disabled = false;
+          setFabStatus('', '');
+        }, 2500);
+      } else {
+        const err = (response && response.error) || 'Không thể copy sản phẩm';
+        __fabEls.copyBtn.textContent = origText;
+        __fabEls.copyBtn.disabled = false;
+        setFabStatus(err, 'error');
+      }
+    });
+  }
+
+  // Đọc cấu hình bật/tắt + trạng thái thu gọn, rồi dựng nút
+  function initFab() {
+    try {
+      chrome.storage?.local.get(['floatButtonEnabled', 'floatButtonMinimized', 'floatButtonPos'], (res) => {
+        __fabEnabled = res.floatButtonEnabled !== false; // mặc định bật
+        __fabMinimized = res.floatButtonMinimized === true;
+        const p = res.floatButtonPos;
+        if (p && p.anchorX && typeof p.x === 'number') {
+          __fabPos = p; // định dạng mới (neo theo góc)
+        } else if (p && typeof p.right === 'number') {
+          // định dạng cũ {right, bottom} -> quy về góc phải-dưới
+          __fabPos = { anchorX: 'right', x: p.right, anchorY: 'bottom', y: p.bottom || 0 };
+        }
+        refreshFabVisibility();
+      });
+      // Phản ứng khi người dùng đổi cài đặt trong lúc đang mở trang
+      chrome.storage?.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
+        if (changes.floatButtonEnabled) {
+          __fabEnabled = changes.floatButtonEnabled.newValue !== false;
+          refreshFabVisibility();
+        }
+      });
+    } catch (e) {
+      refreshFabVisibility();
+    }
+  }
+
+  // ============================================================
   // Gửi dữ liệu về background / popup
   // ============================================================
 
@@ -573,6 +952,10 @@
     extractionAttempts++;
     const productData = await extractProductData();
 
+    // Lưu lại cho nút float + cập nhật thông tin hiển thị ngay khi có
+    __copeeLatestData = productData;
+    updateFabInfo();
+
     console.log(`[Copee] Lần quét ${extractionAttempts}/${maxAttempts}:`, {
       hasTitle: !!productData.title,
       hasPrice: productData.price > 0,
@@ -594,9 +977,10 @@
 
   // Khởi động
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => setTimeout(tryExtractWithRetry, 500));
+    document.addEventListener('DOMContentLoaded', () => { setTimeout(tryExtractWithRetry, 500); initFab(); });
   } else {
     setTimeout(tryExtractWithRetry, 500);
+    initFab();
   }
 
   // Re-extract khi DOM thay đổi nhiều (nội dung động)
@@ -627,6 +1011,11 @@
     __copeeLastHref = location.href;
     console.log('[Copee] URL đổi -> quét lại sản phẩm mới');
     extractionAttempts = 0;
+    // Reset dữ liệu cũ để nút float không copy nhầm sản phẩm trước đó
+    __copeeLatestData = null;
+    updateFabInfo();
+    setFabStatus('', '');
+    refreshFabVisibility();
     clearTimeout(window.copeeExtractTimeout);
     // Chờ DOM sản phẩm mới render xong mới quét (tránh dính ảnh/giá sản phẩm cũ)
     window.copeeExtractTimeout = setTimeout(tryExtractWithRetry, 1200);
